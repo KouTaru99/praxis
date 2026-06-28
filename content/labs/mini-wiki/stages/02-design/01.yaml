@@ -1,0 +1,11 @@
+id: des-01
+title: Viết ADR chọn techstack
+order: 1
+est_minutes: 20
+goal: Ghi lại quyết định chọn công nghệ và lý do.
+deliverable: docs/adr/ADR-001.md theo mẫu Context → Options → Decision.
+outcome_preview: Bạn sẽ tập thói quen ghi lại 'vì sao chọn', đúng cách kỹ sư thật.
+blocks:
+- type: prose
+  content: ADR (Architecture Decision Record) ghi lại một quyết định kỹ thuật + lý do, để sau này nhìn
+    lại biết vì sao đã chọn vậy.

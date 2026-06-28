@@ -1,0 +1,13 @@
+id: be-03
+title: Viết CRUD API cho Bài viết
+order: 3
+est_minutes: 45
+commit_ref: b7c8d9e
+goal: Viết 5 endpoint CRUD cho Bài viết.
+deliverable: api/src/routes/articles.ts chạy được, test bằng curl.
+outcome_preview: Bạn sẽ gọi được POST /api/articles và thấy bài vừa tạo trả về JSON.
+blocks:
+- type: prose
+  content: Express Router gom các endpoint liên quan vào một file cho gọn.
+- type: command
+  content: 'curl -X POST localhost:3000/api/articles -H ''Content-Type: application/json'' -d ''{"title":"Test"}'''

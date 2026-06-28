@@ -1,0 +1,16 @@
+id: be-01
+title: Khởi tạo project Express + TypeScript
+order: 1
+est_minutes: 30
+commit_ref: a1b2c3d
+goal: Dựng bộ khung server Express bằng TypeScript.
+deliverable: api/ chạy được, mở http://localhost:3000 trả về 'OK'.
+outcome_preview: Bạn sẽ thấy server in ra 'listening on 3000' khi chạy.
+blocks:
+- type: prose
+  content: Khởi tạo project Node + TypeScript và cài Express.
+- type: command
+  content: npm init -y && npm install express && npm install -D typescript @types/express tsx
+- type: callout
+  variant: tip
+  content: Nếu thiếu lệnh node, cài Node 20 LTS từ nodejs.org trước.

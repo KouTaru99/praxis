@@ -1,0 +1,10 @@
+id: test-01
+title: Viết test cho API
+order: 1
+est_minutes: 40
+goal: Viết integration test cho các endpoint.
+deliverable: npm test xanh toàn bộ.
+outcome_preview: Bạn sẽ thấy báo cáo test pass cho các API.
+blocks:
+- type: prose
+  content: Dùng Vitest + Supertest gọi thẳng API và kiểm tra phản hồi.

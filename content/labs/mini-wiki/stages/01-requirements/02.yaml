@@ -1,0 +1,12 @@
+id: req-02
+title: Phác sơ đồ thực thể (ERD)
+order: 2
+est_minutes: 20
+goal: Vẽ sơ đồ quan hệ giữa Bài viết và Tag.
+deliverable: docs/erd.md có sơ đồ Mermaid 3 bảng.
+outcome_preview: Bạn sẽ thấy rõ Bài viết và Tag nối nhau kiểu nhiều-nhiều.
+blocks:
+- type: prose
+  content: Một bài có nhiều tag, một tag thuộc nhiều bài — quan hệ nhiều-nhiều, cần bảng nối.
+- type: diagram
+  content: "erDiagram\n  ARTICLES ||--o{ ARTICLE_TAGS : has\n  TAGS ||--o{ ARTICLE_TAGS : has"

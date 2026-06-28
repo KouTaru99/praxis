@@ -1,0 +1,13 @@
+id: mini-wiki
+title: Xây dựng Mini-Wiki
+category: dev
+complexity: trung-cap
+est_hours: 10
+description: CRUD Bài viết + Tag + Markdown + Search + Deploy theo quy trình PTPM — copy theo là chạy.
+repo_solution: https://github.com/KouTaru99/mini-wiki
+tags:
+- nodejs
+- react
+- postgresql
+- docker
+- typescript

@@ -1,0 +1,11 @@
+id: req-01
+title: Viết yêu cầu sản phẩm
+order: 1
+est_minutes: 20
+goal: Viết file requirements.md mô tả Mini-Wiki làm được gì.
+deliverable: docs/requirements.md liệt kê tính năng + user story.
+outcome_preview: Bạn sẽ có 1 file mô tả rõ phạm vi để không lạc hướng khi code.
+blocks:
+- type: prose
+  content: 'Mini-Wiki là nơi lưu các bài viết ngắn, mỗi bài gắn vài tag để lọc và tìm. Trước khi code,
+    ta viết ra cho rõ: ai dùng, làm được gì, không làm gì.'

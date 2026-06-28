@@ -1,0 +1,35 @@
+id: be-02
+title: Thiết kế & tạo schema cơ sở dữ liệu
+order: 2
+est_minutes: 45
+commit_ref: d4e5f6a
+goal: Tạo 3 bảng cơ sở dữ liệu để lưu Bài viết, Tag và quan hệ giữa chúng. Copy đúng các lệnh bên dưới
+  là xong — chưa cần tự nghĩ cấu trúc.
+deliverable: 3 bảng articles, tags, article_tags đã có trong CSDL.
+outcome_preview: Gõ \dt trong CSDL hiện ra đúng 3 bảng vừa tạo.
+blocks:
+- type: prose
+  content: Mini-Wiki cần lưu bài viết và các tag gắn vào bài. Một bài có nhiều tag, một tag thuộc nhiều
+    bài — đây là quan hệ nhiều-nhiều, cần một bảng nối.
+- type: callout
+  variant: info
+  content: Bảng nối giống một quyển sổ ghi 'bài nào — tag nào', mỗi dòng là một cặp.
+- type: diagram
+  content: "erDiagram\n  ARTICLES ||--o{ ARTICLE_TAGS : \"\"\n  TAGS ||--o{ ARTICLE_TAGS : \"\""
+- type: code
+  lang: sql
+  filename: db/schema.sql
+  content: "CREATE TABLE articles (\n  id          SERIAL       PRIMARY KEY,\n  title       VARCHAR(255)\
+    \ NOT NULL,\n  slug        VARCHAR(255) NOT NULL UNIQUE,\n  content     TEXT         NOT NULL,\n \
+    \ created_at  TIMESTAMPTZ  DEFAULT now()\n);"
+- type: prose
+  content: 'Khởi động PostgreSQL bằng Docker để có nơi chạy các lệnh trên:'
+- type: command
+  content: docker compose up -d db
+- type: prose
+  content: 'Kết quả mong đợi: terminal in `Container db Started` — CSDL đã chạy, sẵn sàng nhận lệnh tạo
+    bảng.'
+- type: callout
+  variant: warning
+  content: Đừng nhét tag vào một cột text của bài viết (vd 'java,web') — sẽ không lọc/đếm theo tag được.
+    Luôn tách bảng nối article_tags.

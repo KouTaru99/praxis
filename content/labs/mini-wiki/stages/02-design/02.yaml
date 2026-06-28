@@ -1,0 +1,10 @@
+id: des-02
+title: Chốt hợp đồng API chi tiết
+order: 2
+est_minutes: 25
+goal: Định nghĩa request/response cho từng endpoint.
+deliverable: docs/api.md đầy đủ schema + mã lỗi.
+outcome_preview: Bạn sẽ biết chính xác mỗi API nhận gì, trả gì trước khi code.
+blocks:
+- type: prose
+  content: Hợp đồng API rõ ràng giúp frontend và backend làm song song mà không chờ nhau.

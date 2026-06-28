@@ -1,0 +1,11 @@
+id: be-04
+title: Tag & quan hệ nhiều-nhiều
+order: 4
+est_minutes: 35
+commit_ref: c1d2e3f
+goal: Thêm CRUD cho Tag và gắn tag vào bài.
+deliverable: Gắn/bỏ tag cho một bài hoạt động đúng.
+outcome_preview: Bạn sẽ thấy một bài viết kèm danh sách tag khi gọi API.
+blocks:
+- type: prose
+  content: Dùng bảng nối article_tags để gắn tag — thêm/xoá cặp (article_id, tag_id).

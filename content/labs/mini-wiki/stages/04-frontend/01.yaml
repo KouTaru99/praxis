@@ -1,0 +1,12 @@
+id: fe-01
+title: Khởi tạo React + Vite
+order: 1
+est_minutes: 25
+goal: Dựng bộ khung frontend React bằng Vite.
+deliverable: web/ chạy, mở http://localhost:5173 thấy trang trắng có tiêu đề.
+outcome_preview: Bạn sẽ thấy trang React chạy với hot-reload.
+blocks:
+- type: prose
+  content: Vite cho trải nghiệm dev nhanh, hot-reload gần như tức thì.
+- type: command
+  content: npm create vite@latest web -- --template react-ts

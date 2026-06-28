@@ -1,0 +1,12 @@
+id: dep-01
+title: Đóng gói Docker
+order: 1
+est_minutes: 30
+goal: Viết Dockerfile + docker-compose cho toàn bộ app.
+deliverable: docker compose up chạy cả api + web + db.
+outcome_preview: Bạn sẽ thấy cả 3 service lên cùng lúc bằng một lệnh.
+blocks:
+- type: prose
+  content: docker-compose gom api, web, db vào một lệnh khởi động duy nhất.
+- type: command
+  content: docker compose up -d

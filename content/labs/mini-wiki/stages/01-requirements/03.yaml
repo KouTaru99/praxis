@@ -1,0 +1,11 @@
+id: req-03
+title: Phác hợp đồng API
+order: 3
+est_minutes: 15
+goal: Liệt kê các endpoint API sẽ cần.
+deliverable: docs/api.md liệt kê method + path.
+outcome_preview: Bạn sẽ có danh sách API để bám theo khi viết backend.
+blocks:
+- type: prose
+  content: 'Liệt kê trước các endpoint: CRUD bài viết, CRUD tag, tìm kiếm. Có danh sách này thì viết code
+    không bị thiếu.'

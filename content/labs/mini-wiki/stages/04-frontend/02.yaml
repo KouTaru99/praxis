@@ -1,0 +1,10 @@
+id: fe-02
+title: Trang danh sách bài viết
+order: 2
+est_minutes: 35
+goal: Gọi API và hiển thị danh sách bài.
+deliverable: Trang chủ web hiện danh sách bài từ backend.
+outcome_preview: Bạn sẽ thấy các bài viết vừa tạo hiện lên giao diện.
+blocks:
+- type: prose
+  content: Dùng fetch gọi GET /api/articles rồi render ra danh sách.

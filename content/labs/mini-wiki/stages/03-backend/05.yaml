@@ -1,0 +1,11 @@
+id: be-05
+title: Tìm kiếm full-text (PostgreSQL FTS)
+order: 5
+est_minutes: 30
+commit_ref: e4f5a6b
+goal: Thêm endpoint tìm kiếm bài theo từ khoá.
+deliverable: GET /api/search?q=... trả về bài khớp.
+outcome_preview: Bạn sẽ gõ từ khoá và thấy danh sách bài chứa từ đó.
+blocks:
+- type: prose
+  content: PostgreSQL có sẵn full-text search — không cần cài thêm công cụ ngoài.
