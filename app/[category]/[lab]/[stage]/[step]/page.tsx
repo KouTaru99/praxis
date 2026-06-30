@@ -35,6 +35,7 @@ export default async function StepPage({
   return (
     <div style={{ padding: 22 }}>
       <div
+        className="panel"
         style={{
           maxWidth: 940,
           margin: '0 auto',
@@ -104,13 +105,14 @@ export default async function StepPage({
                     return (
                       <Link
                         key={s.id}
+                        className={active ? 'nav-step is-active' : 'nav-step'}
                         href={`/${category}/${labId}/${st.id}/${s.id}`}
                         style={{
                           fontSize: 13,
                           padding: '6px 9px',
                           borderRadius: 'var(--border-radius-md)',
                           color: active ? 'var(--color-text-info)' : 'var(--color-text-secondary)',
-                          background: active ? 'var(--color-background-info)' : 'transparent',
+                          ...(active ? { background: 'var(--color-background-info)' } : {}),
                           border: active
                             ? '0.5px solid var(--color-border-info)'
                             : '0.5px solid transparent',
@@ -232,15 +234,18 @@ function NavBtn({
   return (
     <Link
       href={href}
+      className="nav-btn"
       style={{
         display: 'inline-flex',
         alignItems: 'center',
         gap: 6,
         border: `0.5px solid ${primary ? 'var(--color-border-info)' : 'var(--color-border-secondary)'}`,
         color: primary ? 'var(--color-text-info)' : 'var(--color-text-primary)',
+        background: primary ? 'var(--color-background-info)' : 'var(--color-background-primary)',
         borderRadius: 'var(--border-radius-md)',
-        padding: '7px 13px',
+        padding: '8px 14px',
         fontSize: 13,
+        fontWeight: 500,
       }}
     >
       {dir === 'prev' && <i className="ti ti-arrow-left" />}

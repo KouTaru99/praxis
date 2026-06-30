@@ -89,6 +89,7 @@ export default async function LabPage({
               {stage.steps.map((step) => (
                 <Link
                   key={step.id}
+                  className="step-link"
                   href={`/${category}/${labId}/${stage.id}/${step.id}`}
                   style={{
                     display: 'flex',
@@ -98,6 +99,7 @@ export default async function LabPage({
                     border: '0.5px solid var(--color-border-tertiary)',
                     borderRadius: 'var(--border-radius-md)',
                     padding: '6px 11px',
+                    background: 'var(--color-background-primary)',
                     color: 'var(--color-text-secondary)',
                   }}
                 >

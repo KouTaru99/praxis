@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { Block } from '@/lib/types';
 import MermaidDiagram from './MermaidDiagram';
+import CodeBlock from './CodeBlock';
 
 // Markdown-lite: parse **đậm**, *nghiêng* và `inline-code` ra React nodes (an toàn, không innerHTML).
 // Không lồng nhau (parser 1 cấp): tránh viết `code` bên trong **bold**.
@@ -99,44 +100,17 @@ function OneBlock({ block }: { block: Block }) {
 
     case 'code':
       return (
-        <div style={{ marginBottom: 14 }}>
-          {block.filename && <Label icon="ti-file-code" text={block.filename} />}
-          <pre
-            style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 12.5,
-              lineHeight: 1.6,
-              background: 'var(--color-background-secondary)',
-              border: '0.5px solid var(--color-border-tertiary)',
-              borderRadius: 'var(--border-radius-md)',
-              padding: '13px 15px',
-              overflow: 'auto',
-            }}
-          >
-            <code>{block.content}</code>
-          </pre>
-        </div>
+        <CodeBlock code={block.content} lang={block.lang} filename={block.filename} kind="code" />
       );
 
     case 'command':
       return (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 10,
-            background: '#1B1B19',
-            borderRadius: 'var(--border-radius-md)',
-            padding: '10px 13px',
-            marginBottom: 14,
-          }}
-        >
-          <code style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: '#ECEBE6' }}>
-            {block.content}
-          </code>
-          <i className="ti ti-copy" style={{ fontSize: 15, color: '#A8A79F' }} aria-hidden="true" />
-        </div>
+        <CodeBlock
+          code={block.content}
+          lang={block.lang ?? 'bash'}
+          filename={block.label}
+          kind="command"
+        />
       );
 
     case 'callout': {

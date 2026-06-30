@@ -27,6 +27,7 @@ function stepCount(lab: Lab) {
 function LabCard({ lab }: { lab: Lab }) {
   return (
     <Link
+      className="lab-card"
       href={`/${lab.category}/${lab.id}`}
       style={{
         background: 'var(--color-background-primary)',
@@ -79,6 +80,7 @@ function LabCard({ lab }: { lab: Lab }) {
         </Tag>
       </div>
       <div
+        className="lab-card-cta"
         style={{
           marginTop: 2,
           fontSize: 13,
