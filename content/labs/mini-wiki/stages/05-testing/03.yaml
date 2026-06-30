@@ -1,0 +1,77 @@
+id: test-03
+title: Smoke-test nghiệm thu toàn API
+order: 3
+est_minutes: 30
+commit_ref: 0afbceb
+goal: Viết script smoke-test chạy 12 kịch bản end-to-end qua curl, xác nhận toàn hệ thống hoạt động.
+deliverable: scripts/smoke-test.sh + docs/acceptance.md; chạy ra 12/12 PASS.
+outcome_preview: Bạn sẽ chạy một lệnh và thấy 12 dấu ✓ xanh — bằng chứng cả luồng API hoạt động đúng trước khi đóng gói.
+blocks:
+- type: prose
+  content: |
+    Test ở bước 5.1 chạy trên database test cô lập. Bước cuối Chặng 5 làm việc ngược lại: **smoke-test** gọi API *thật đang chạy* qua `curl`, đi hết một vòng đời dữ liệu (tạo → đọc → sửa → tìm → xóa). Đây là "nghiệm thu cuối" — nếu 12/12 xanh, hệ thống sẵn sàng đóng gói.
+
+    Script dùng `set -euo pipefail` (dừng ngay khi có lỗi) và một hàm `assert_status` so mã HTTP:
+- type: code
+  filename: scripts/smoke-test.sh (khung)
+  lang: bash
+  content: |
+    #!/usr/bin/env bash
+    # Kiểm tra toàn bộ API mini-wiki end-to-end. Chạy: bash scripts/smoke-test.sh
+    set -euo pipefail
+    BASE_URL="${BASE_URL:-http://localhost:3000}"
+    PASS=0; FAIL=0
+
+    assert_status() { # assert_status <mong-đợi> <thực-tế> <mô-tả>
+      if [ "$2" -eq "$1" ]; then
+        echo "  ✓ $3 (HTTP $2)"; PASS=$((PASS + 1))
+      else
+        echo "  ✗ $3 — mong đợi $1, nhận $2"; FAIL=$((FAIL + 1))
+      fi
+    }
+
+    # API có sống không?
+    if ! curl -sf "$BASE_URL/health" > /dev/null; then
+      echo "Lỗi: API không phản hồi. Hãy chạy: docker compose up -d db && cd api && npm run dev"
+      exit 1
+    fi
+
+    TS=$(date +%s)                       # timestamp -> dữ liệu test không trùng
+    TITLE="Smoke Test Article $TS"
+
+    # Ví dụ 2 trong 12 kịch bản:
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/articles")
+    assert_status 200 "$code" "GET danh sách bài viết"
+
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/api/articles" \
+      -H 'Content-Type: application/json' -d "{\"title\":\"$TITLE\",\"content\":\"# Hi\"}")
+    assert_status 201 "$code" "POST tạo bài viết mới"
+
+    # ... 10 kịch bản còn lại: get-by-slug, update, search, tag CRUD,
+    #     xóa tag đang dùng (409), delete bài, 404 sau khi xóa ...
+
+    echo ""; echo "Kết quả: $PASS pass, $FAIL fail"
+    [ "$FAIL" -eq 0 ] || exit 1
+- type: prose
+  content: |
+    `docs/acceptance.md` ghi rõ 12 kịch bản nghiệm thu (mỗi cái: hành động → mã mong đợi), để bất kỳ ai cũng kiểm chứng được hệ thống "đạt" theo tiêu chí công khai, không mơ hồ.
+- type: callout
+  variant: warning
+  content: |
+    **Một bẫy thật khi viết smoke-test:** khi bạn `PUT` đổi *title* của bài, backend **sinh lại slug** từ title mới. Nếu script vẫn dùng slug cũ để `DELETE` ở bước sau, nó sẽ nhận 404 và test fail oan. Phải bắt slug *mới* từ response của bước update. Đây là kiểu lỗi mà chỉ khi chạy *cả luồng end-to-end* mới lộ ra — đúng giá trị của smoke-test.
+- type: callout
+  variant: info
+  content: |
+    **Hai loại test bổ sung cho nhau.** Test ở 5.1 (Vitest) nhanh, cô lập, chạy mỗi lần code đổi — tốt để bắt lỗi sớm. Smoke-test ở đây chậm hơn, cần hệ thống thật chạy — tốt để xác nhận "ráp lại với nhau vẫn đúng". Một dự án chỉn chu có cả hai: unit/integration test cho vòng lặp nhanh, smoke-test cho nghiệm thu trước khi giao.
+- type: command
+  label: Chạy smoke-test + lưu mốc bước 5.3 — kết thúc Chặng 5
+  content: |
+    # Terminal 1: docker compose up -d db && cd api && npm run dev   (Node 22)
+    # Terminal 2:
+    bash scripts/smoke-test.sh        # mong đợi: 12 pass, 0 fail
+    git add scripts docs/acceptance.md
+    git commit -m "[step-5.3] Acceptance smoke-test toàn API (12 kịch bản)"
+- type: resource
+  label: Commit đối chiếu — script + acceptance đầy đủ (step-5.3)
+  url: https://github.com/KouTaru99/mini-wiki/commit/0afbceb
+  kind: docs

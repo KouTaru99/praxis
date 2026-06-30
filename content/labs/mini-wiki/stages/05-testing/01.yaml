@@ -1,10 +1,174 @@
 id: test-01
-title: Viết test cho API
+title: Viết test (Vitest + Supertest)
 order: 1
-est_minutes: 40
-goal: Viết integration test cho các endpoint.
-deliverable: npm test xanh toàn bộ.
-outcome_preview: Bạn sẽ thấy báo cáo test pass cho các API.
+est_minutes: 45
+commit_ref: 66691b8
+goal: Viết unit test + integration test cho API, chạy trên một database test riêng biệt.
+deliverable: Bộ test (slug, markdown, articles, tags, search) chạy xanh; coverage ≥ 70%.
+outcome_preview: Bạn sẽ chạy npm test và thấy 31 test pass cùng báo cáo độ phủ — lưới an toàn cho mọi thay đổi sau này.
 blocks:
 - type: prose
-  content: Dùng Vitest + Supertest gọi thẳng API và kiểm tra phản hồi.
+  content: |
+    Code chạy được chưa đủ — ta cần **test tự động** làm lưới an toàn. Mini-Wiki dùng **Vitest** (test runner nhanh) + **Supertest** (gọi thẳng API trong test, không cần mở server thật). Có 2 loại test: *unit* (kiểm hàm thuần như `toSlug`, `renderMarkdown`) và *integration* (gọi API thật, kiểm cả luồng qua database).
+- type: callout
+  variant: warning
+  content: |
+    **Lab này dùng Node 22 LTS** (không phải Node 20). Chuỗi thư viện `isomorphic-dompurify` + `jsdom` (mà test markdown cần) đòi `require(ESM)`, chỉ hoạt động đúng từ Node 22.12 trở lên. Tạo file `.nvmrc` chứa đúng số `22`, rồi chạy `nvm use` để chốt phiên bản. Đây là một quyết định kỹ thuật có thật trong dự án — và là lý do tốt để hiểu vì sao "phiên bản runtime" cũng là một phần của kiến trúc.
+- type: prose
+  content: |
+    Để Supertest gọi được app mà không cần `listen`, ta **tách app.ts khỏi index.ts**: `app.ts` chỉ tạo và export `app`; `index.ts` chỉ `app.listen(...)`. Test import `app`, production import `index`:
+- type: code
+  filename: api/src/app.ts (tách ra từ index.ts)
+  lang: typescript
+  content: |
+    import 'dotenv/config';
+    import cors from 'cors';
+    import express from 'express';
+    import morgan from 'morgan';
+    import { errorHandler } from './middleware/errorHandler.js';
+    import { notFound } from './middleware/notFound.js';
+    import articlesRouter from './routes/articles.routes.js';
+    import tagsRouter from './routes/tags.routes.js';
+    import searchRouter from './routes/search.routes.js';
+
+    const app = express();
+    app.use(cors({ origin: process.env.CORS_ORIGIN }));
+    app.use(express.json());
+    app.use(morgan('dev'));
+    app.get('/health', (_req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+    app.use('/api/articles', articlesRouter);
+    app.use('/api/tags', tagsRouter);
+    app.use('/api/search', searchRouter);
+    app.use(notFound);
+    app.use(errorHandler);
+
+    export { app };
+
+    // index.ts giờ chỉ còn:
+    //   import { app } from './app.js';
+    //   app.listen(process.env.PORT ?? 3000, () => { ... });
+- type: prose
+  content: |
+    Cấu hình Vitest — quan trọng nhất là trỏ vào **database test riêng** (`miniwiki_test`) để test không đụng dữ liệu dev, và đặt **ngưỡng coverage 70%**:
+- type: code
+  filename: api/vitest.config.ts
+  lang: typescript
+  content: |
+    import { defineConfig } from 'vitest/config';
+    import dotenv from 'dotenv';
+
+    dotenv.config({ path: '.env.test' }); // DATABASE_URL trỏ miniwiki_test
+
+    export default defineConfig({
+      test: {
+        environment: 'node',
+        env: { DATABASE_URL: process.env.DATABASE_URL ?? '' },
+        globalSetup: 'src/test/global-setup.ts', // dựng DB test + migrate
+        setupFiles: ['src/test/setup.ts'],        // truncate trước mỗi test
+        fileParallelism: false,                   // tránh đụng độ khi truncate
+        testTimeout: 30_000,
+        coverage: {
+          provider: 'v8',
+          include: ['src/**'],
+          exclude: ['src/index.ts', '**/*.test.ts', 'src/test/**'],
+          thresholds: { lines: 70, functions: 70, statements: 70, branches: 70 },
+        },
+      },
+    });
+- type: prose
+  content: |
+    `setup.ts` xóa sạch bảng **trước mỗi test** để các test hoàn toàn độc lập (không phụ thuộc thứ tự chạy):
+- type: code
+  filename: api/src/test/setup.ts
+  lang: typescript
+  content: |
+    import { afterAll, beforeEach } from 'vitest';
+    import { prisma } from '../lib/prisma.js';
+
+    // Xóa sạch + reset id về 1 trước mỗi test -> test độc lập, id đoán được
+    beforeEach(async () => {
+      await prisma.$executeRawUnsafe('TRUNCATE article_tags, articles, tags RESTART IDENTITY CASCADE');
+    });
+    afterAll(async () => { await prisma.$disconnect(); });
+- type: prose
+  content: |
+    **Unit test** — kiểm hàm thuần, chạy nhanh, không cần DB. Ví dụ test `toSlug` và test XSS của `renderMarkdown`:
+- type: code
+  filename: api/src/lib/slug.test.ts + markdown.test.ts
+  lang: typescript
+  content: |
+    // slug.test.ts
+    import { describe, expect, it } from 'vitest';
+    import { toSlug } from './slug.js';
+
+    describe('toSlug', () => {
+      it('bỏ dấu tiếng Việt, viết thường, nối bằng gạch ngang', () => {
+        expect(toSlug('Học Git Cơ Bản')).toBe('hoc-git-co-ban');
+      });
+      it('loại bỏ ký tự đặc biệt', () => {
+        expect(toSlug('Hello! World?')).toBe('hello-world');
+      });
+    });
+
+    // markdown.test.ts — đáng chú ý: test XSS xác nhận lá chắn hoạt động
+    import { renderMarkdown } from './markdown.js';
+
+    describe('renderMarkdown', () => {
+      it('## tiêu đề -> <h2>', async () => {
+        expect(await renderMarkdown('## Tiêu đề')).toContain('<h2>');
+      });
+      it('XSS: loại bỏ <script>', async () => {
+        expect(await renderMarkdown('<script>alert(1)</script>')).not.toContain('<script>');
+      });
+      it('XSS: loại bỏ onerror', async () => {
+        expect(await renderMarkdown('<img src=x onerror=alert(1)>')).not.toContain('onerror');
+      });
+    });
+- type: prose
+  content: |
+    **Integration test** — dùng Supertest gọi API thật qua database test. Ví dụ một phần `articles.test.ts`:
+- type: code
+  filename: api/src/routes/articles.test.ts (trích)
+  lang: typescript
+  content: |
+    import { describe, expect, it } from 'vitest';
+    import request from 'supertest';
+    import { app } from '../app.js';
+
+    describe('Articles API — /api/articles', () => {
+      it('GET / trả 200 và data rỗng khi chưa có bài', async () => {
+        const res = await request(app).get('/api/articles');
+        expect(res.status).toBe(200);
+        expect(res.body.data).toEqual([]);
+      });
+
+      it('POST / tạo bài -> 201, slug đúng', async () => {
+        const res = await request(app)
+          .post('/api/articles')
+          .send({ title: 'Bài viết đầu tiên', content: '# Nội dung' });
+        expect(res.status).toBe(201);
+        expect(res.body.slug).toBe('bai-viet-dau-tien');
+      });
+
+      it('POST / slug trùng -> 409', async () => {
+        await request(app).post('/api/articles').send({ title: 'Trùng', content: 'x' });
+        const res = await request(app).post('/api/articles').send({ title: 'Trùng', content: 'y' });
+        expect(res.status).toBe(409);
+      });
+    });
+    // Tương tự cho tags.test.ts, search.test.ts — tổng cộng 31 test.
+- type: callout
+  variant: info
+  content: |
+    **Vì sao cần database test riêng?** Nếu test chạy trên DB dev, mỗi lần `TRUNCATE` (xóa sạch) sẽ thổi bay dữ liệu mẫu bạn đang dùng để thử tay. Tách `miniwiki_test` cho phép test thoải mái tạo/xóa mà không ảnh hưởng DB dev. `global-setup.ts` lo việc dựng DB test này + chạy migration trước khi test bắt đầu.
+- type: command
+  label: Chạy test + lưu mốc bước 5.1
+  content: |
+    nvm use                  # dùng Node 22 (theo .nvmrc)
+    npm test                 # 31 test pass
+    npm run test -- --coverage   # xem độ phủ (gate 70%)
+    git add . && git commit -m "[step-5.1] Vitest unit + Supertest integration (31 test)"
+- type: resource
+  label: Commit đối chiếu — bộ test đầy đủ (step-5.1)
+  url: https://github.com/KouTaru99/mini-wiki/commit/66691b8
+  kind: docs

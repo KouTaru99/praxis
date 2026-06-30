@@ -1,0 +1,91 @@
+id: test-02
+title: Quy trình review trước khi merge
+order: 2
+est_minutes: 25
+commit_ref: 561715c
+goal: Dựng quy trình Pull Request + checklist review — cách code đi vào nhánh chính ở công ty thật.
+deliverable: .github/pull_request_template.md + docs/code-review-checklist.md (6 nhóm tiêu chí).
+outcome_preview: Bạn sẽ có một quy trình review chuẩn — biết tự rà code mình trước khi nộp, và soi code người khác có hệ thống.
+blocks:
+- type: prose
+  content: |
+    Ở công ty phần mềm, code **không bao giờ** đi thẳng từ máy lập trình viên lên production. Luồng chuẩn là: *nhánh tính năng → Pull Request (PR) → reviewer soi theo checklist → merge vào nhánh chính*. Review trước merge bắt lỗi khi chi phí sửa còn rẻ nhất, và lan tỏa hiểu biết trong nhóm.
+
+    Bước này không viết code chạy — nó dựng **quy trình**. Trước hết, một mẫu PR để mọi người mô tả thay đổi nhất quán:
+- type: code
+  filename: .github/pull_request_template.md
+  lang: markdown
+  content: |
+    ## Tóm tắt thay đổi
+    <!-- Thêm gì, sửa gì, xóa gì -->
+
+    ## Lý do / liên quan Bước nào
+    - Bước:
+    - Lý do:
+
+    ## Cách kiểm thử
+    ```bash
+    cd api && npm test
+    # Kết quả mong đợi: 31 tests pass, 0 fail
+    ```
+
+    ## Checklist tự rà trước khi nộp PR
+    - [ ] `npm test` chạy xanh
+    - [ ] `npm run build` thành công
+    - [ ] Không commit file bí mật (.env, key, token)
+    - [ ] Cập nhật tài liệu nếu thay đổi API
+    - [ ] Commit message theo quy ước [step-X.Y] mô tả ngắn
+- type: prose
+  content: |
+    Tiếp theo, **checklist review** gồm 6 nhóm tiêu chí — đây là "ống nhòm" để soi PR có hệ thống, không bỏ sót:
+- type: code
+  filename: docs/code-review-checklist.md
+  lang: markdown
+  content: |
+    # Checklist Review Pull Request
+
+    ## 1. Đúng đắn
+    - [ ] Logic khớp acceptance criteria trong spec
+    - [ ] Edge case xử lý (null/rỗng/slug không tồn tại)
+    - [ ] Tạo trùng -> 409, không phải 500 hay im lặng
+    - [ ] Endpoint danh sách có phân trang/giới hạn
+
+    ## 2. Bảo mật
+    - [ ] Query tham số hóa (Prisma) -> chống SQL Injection
+    - [ ] Sanitize HTML (marked + DOMPurify) -> chống XSS
+    - [ ] Không lộ secret; .env trong .gitignore
+    - [ ] Response lỗi không kèm stack trace / đường dẫn nội bộ
+
+    ## 3. Xử lý lỗi
+    - [ ] Mã HTTP đúng (200/201/204/400/404/409)
+    - [ ] Message lỗi rõ ("title là bắt buộc" > "invalid input")
+    - [ ] Không nuốt lỗi im lặng (không có catch rỗng)
+
+    ## 4. Kiểm thử
+    - [ ] Mỗi endpoint mới có ≥1 happy-path + 1 error-path test
+    - [ ] npm test pass 100%, không skip vô cớ
+    - [ ] Coverage không tụt dưới ngưỡng (70%)
+
+    ## 5. Chất lượng code
+    - [ ] Tên biến/hàm rõ nghĩa
+    - [ ] Không lặp code (logic >=2 lần -> tách hàm)
+    - [ ] Type chặt, không dùng any
+    - [ ] Không code chết (console.log debug, import thừa)
+
+    ## 6. Git & repo
+    - [ ] Commit nhỏ, message [step-X.Y]
+    - [ ] Không lẫn file rác (dist/, coverage/, .DS_Store)
+    - [ ] Nhánh đặt tên đúng quy ước (feature/...)
+- type: callout
+  variant: tip
+  content: |
+    **Checklist không phải để "đối phó" — nó là trí nhớ ngoài.** Ngay cả reviewer giỏi cũng quên kiểm một góc nào đó khi mệt. Một checklist tốt biến việc review từ "tùy cảm hứng" thành "có hệ thống". Quan trọng hơn: khi *bạn* tự rà code mình theo checklist này trước khi nộp, bạn bắt được phần lớn lỗi trước cả khi reviewer nhìn vào.
+- type: command
+  label: Lưu mốc bước 5.2
+  content: |
+    git add .github docs/code-review-checklist.md
+    git commit -m "[step-5.2] GitHub PR template + code-review checklist"
+- type: resource
+  label: Commit đối chiếu (step-5.2)
+  url: https://github.com/KouTaru99/mini-wiki/commit/561715c
+  kind: docs
