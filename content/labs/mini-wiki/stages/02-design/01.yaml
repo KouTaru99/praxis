@@ -1,11 +1,75 @@
 id: des-01
 title: Viết ADR chọn techstack
 order: 1
-est_minutes: 20
-goal: Ghi lại quyết định chọn công nghệ và lý do.
-deliverable: docs/adr/ADR-001.md theo mẫu Context → Options → Decision.
-outcome_preview: Bạn sẽ tập thói quen ghi lại 'vì sao chọn', đúng cách kỹ sư thật.
+est_minutes: 25
+commit_ref: 3f59dd2
+goal: Ghi lại các quyết định công nghệ quan trọng kèm lý do — đúng cách kỹ sư thật làm.
+deliverable: 3 file ADR (ADR-001 techstack, ADR-002 Prisma, ADR-003 PostgreSQL) trong docs/adr/.
+outcome_preview: Bạn sẽ tập thói quen ghi "vì sao chọn X chứ không phải Y" — tài sản giúp người sau hiểu bối cảnh quyết định.
 blocks:
 - type: prose
-  content: ADR (Architecture Decision Record) ghi lại một quyết định kỹ thuật + lý do, để sau này nhìn
-    lại biết vì sao đã chọn vậy.
+  content: |
+    Bước vào giai đoạn **Thiết kế**, việc đầu tiên là chốt công nghệ. Nhưng kỹ sư giỏi không chỉ chọn — họ **ghi lại vì sao chọn**, bằng **ADR (Architecture Decision Record — Biên bản Quyết định Kiến trúc)**.
+
+    Một ADR trả lời 4 câu: bối cảnh nào (**Context**), có những phương án nào (**Options**), chọn gì (**Decision**), và đánh đổi ra sao (**Consequences**). Sáu tháng sau, khi ai đó hỏi "sao hồi đó không dùng X?", ADR trả lời thay bạn.
+- type: prose
+  content: |
+    Tạo thư mục `docs/adr/` và file đầu tiên `ADR-001-techstack.md`. Đây là bản rút gọn — copy vào, sau đó đối chiếu bản đầy đủ ở commit cuối bước:
+- type: command
+  label: Tạo thư mục ADR
+  content: mkdir -p docs/adr
+- type: code
+  filename: docs/adr/ADR-001-techstack.md
+  lang: markdown
+  content: |
+    # ADR-001 — Node.js 20 + Express 5 + TypeScript (BE) & React 18 + Vite 6 (FE)
+
+    ## Trạng thái
+    Accepted — 2026-06-28
+
+    ## Bối cảnh (Context)
+    Mini-Wiki là ứng dụng wiki công khai CRUD phục vụ học tập. Cần chọn runtime + framework Back-end và framework Front-end.
+    Ràng buộc: ưu tiên 1 ngôn ngữ xuyên suốt (giảm friction cho người học); tách FE/BE để dạy rõ API boundary; v1 không cần SSR.
+
+    ## Các lựa chọn (Options)
+
+    Back-end:
+    | Phương án | Dẫn chứng |
+    |---|---|
+    | Node.js 20 + Express 5 + TypeScript (CHỌN) | Node phổ biến nhất (Stack Overflow 2024); Express ecosystem lớn nhất; TypeScript giảm bug runtime |
+    | Spring Boot (Java) | Barrier học cao (JVM, Gradle, verbose); hợp enterprise nhưng quá nặng cho bài học |
+    | Go + Fiber | Hiệu năng tốt nhưng ecosystem nhỏ, phải học thêm Go |
+    | Python + FastAPI | Async tốt nhưng dynamic typing mặc định |
+
+    Front-end:
+    | Phương án | Dẫn chứng |
+    |---|---|
+    | React 18 + Vite 6 (CHỌN) | React #1 framework (SO 2024); Vite HMR ~50ms, nhanh gấp 10-20 lần webpack |
+    | Next.js 14 | Tốt cho production nhưng làm mờ ranh giới FE/BE, khó dạy API contract |
+    | Vue 3 + Vite | Dễ học nhưng thị phần & tài liệu nhỏ hơn React |
+
+    ## Quyết định (Decision)
+    Node.js 20 + Express 5 + TypeScript (BE) và React 18 + Vite 6 (FE). Lý do cốt lõi: 1 ngôn ngữ TypeScript cho cả 2 đầu; Express tối giản nên người học thấy rõ vòng đời request/response; tách api/ và web/ làm API boundary hiện rõ.
+
+    ## Hệ quả (Consequences)
+    Tích cực: cùng kiến thức TypeScript cho BE+FE; async/await native; npm ecosystem khổng lồ.
+    Đánh đổi: Node single-thread (không hợp tác vụ nặng CPU); Express ít opinionated (tự tổ chức folder); React SPA yếu SEO (chấp nhận, v1 không ưu tiên SEO).
+- type: prose
+  content: |
+    Tạo thêm 2 ADR ngắn cho **Prisma** (ADR-002) và **PostgreSQL** (ADR-003). Cốt lõi mỗi quyết định:
+
+    - **ADR-002 — Prisma 5 (ORM):** chọn vì schema-first (1 file `schema.prisma` mô tả toàn bộ DB), migration được git-track, và client TypeScript tự sinh nên type-safe 100%. Đánh đổi: phải nhớ chạy `prisma generate` sau mỗi lần đổi schema; query phức tạp đôi khi cần `$queryRaw`.
+    - **ADR-003 — PostgreSQL 16 (database):** chọn vì có **Full-Text Search built-in** (GIN index, không cần Elasticsearch) và constraint mạnh (UNIQUE, FK, CASCADE/RESTRICT) đảm bảo toàn vẹn ngay ở tầng DB. Đánh đổi: nặng hơn SQLite, nhưng Docker Compose đã lo việc setup.
+- type: callout
+  variant: info
+  content: |
+    **Vì sao loại Spring Boot dù nó phổ biến ở doanh nghiệp Việt Nam?** Không phải vì nó kém — mà vì **mục tiêu bài học**. Spring Boot kéo theo cả hệ sinh thái JVM (Gradle/Maven, annotation, cấu hình) làm người mới khó thấy "HTTP thực sự chạy thế nào". Express tối giản hơn, lộ rõ cơ chế. ADR ghi rõ lựa chọn này để người đọc hiểu đây là quyết định *có chủ đích theo ngữ cảnh*, không phải bỏ sót.
+- type: command
+  label: Lưu mốc bước 2.1
+  content: |
+    git add docs/adr
+    git commit -m "[step-2.1] ADR-001/002/003 — quyết định techstack"
+- type: resource
+  label: Commit đối chiếu — bản ADR đầy đủ (step-2.1)
+  url: https://github.com/KouTaru99/mini-wiki/commit/3f59dd2
+  kind: docs

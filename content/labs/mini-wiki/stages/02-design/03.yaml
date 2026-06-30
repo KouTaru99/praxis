@@ -1,0 +1,81 @@
+id: des-03
+title: Hình thức hóa API thành OpenAPI 3.0
+order: 3
+est_minutes: 25
+commit_ref: d26d85e
+goal: Biến bản phác API contract (Chặng 1) thành file OpenAPI chuẩn, máy đọc được.
+deliverable: docs/openapi.yaml mô tả 9 endpoint theo chuẩn OpenAPI 3.0.3.
+outcome_preview: Bạn sẽ có một hợp đồng API chính thức — nền tảng để sinh tài liệu tương tác, validate request, hay generate client tự động.
+blocks:
+- type: prose
+  content: |
+    Ở Chặng 1 ta phác `docs/api.md` bằng văn xuôi cho người đọc. Giờ ta nâng nó thành **OpenAPI** (tên cũ: Swagger) — chuẩn mô tả REST API dạng **máy đọc được** (YAML).
+
+    Vì sao đáng công sức này? Một file OpenAPI cho phép: sinh **tài liệu tương tác** (Swagger UI để bấm thử API ngay trên trình duyệt), **validate** request/response tự động, và **generate client SDK** cho front-end. Hợp đồng giờ không chỉ là chữ — nó là *spec thực thi được*.
+- type: prose
+  content: |
+    Tạo `docs/openapi.yaml`. Phần khai báo đầu + một endpoint mẫu (`GET /articles`):
+- type: code
+  filename: docs/openapi.yaml
+  lang: yaml
+  content: |
+    openapi: "3.0.3"
+
+    info:
+      title: Mini-Wiki API
+      version: "1.0.0"
+      description: |
+        REST API công khai cho Mini-Wiki — CRUD bài viết, nhãn và tìm kiếm toàn văn.
+        Không có xác thực người dùng ở v1.
+
+    servers:
+      - url: http://localhost:3000/api
+        description: Dev local
+
+    tags:
+      - name: articles
+        description: Quản lý bài viết
+      - name: tags
+        description: Quản lý nhãn
+      - name: search
+        description: Tìm kiếm toàn văn
+
+    paths:
+      /articles:
+        get:
+          tags: [articles]
+          summary: Lấy danh sách bài viết
+          parameters:
+            - name: tag
+              in: query
+              description: Slug của tag để lọc
+              required: false
+              schema: { type: string }
+            - name: page
+              in: query
+              schema: { type: integer, default: 1, minimum: 1 }
+            - name: limit
+              in: query
+              schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+          responses:
+            "200":
+              description: Danh sách bài viết (không gồm content để giảm payload)
+        # ... POST /articles, /articles/{slug} (GET/PUT/DELETE),
+        # ... /tags (GET/POST), /tags/{id} (DELETE), /search (GET)
+        # Xem đầy đủ 9 endpoint ở commit đối chiếu bên dưới.
+- type: prose
+  content: |
+    File đầy đủ định nghĩa cả 9 endpoint (5 Articles + 3 Tags + 1 Search) cùng các `components/schemas` (Article, Tag, Error) để tái dùng. Mỗi endpoint khai báo rõ tham số, body, và mọi mã lỗi có thể xảy ra — đúng như bảng mã lỗi đã phác ở Chặng 1.
+- type: callout
+  variant: tip
+  content: |
+    **Mẹo nghề:** giữ file OpenAPI **đồng bộ** với code là thử thách thật. Nhiều team dùng cách ngược lại — sinh OpenAPI *từ* code (qua decorator/annotation) để spec không bao giờ lỗi thời. Ở quy mô bài học này, viết tay trước giúp bạn hiểu rõ từng phần của một spec; ở dự án lớn, cân nhắc tự động hóa.
+- type: command
+  label: Lưu mốc bước 2.3 — kết thúc Chặng 2
+  content: |
+    git add docs/openapi.yaml
+    git commit -m "[step-2.3] OpenAPI 3.0.3 contract — hình thức hóa api.md"
+- type: resource
+  label: Commit đối chiếu — OpenAPI đầy đủ 9 endpoint (step-2.3)
+  url: https://github.com/KouTaru99/mini-wiki/commit/d26d85e
+  kind: docs
