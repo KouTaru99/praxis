@@ -1,7 +1,28 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import {
+  Anchor,
+  Badge,
+  Box,
+  Breadcrumbs,
+  Button,
+  Container,
+  Group,
+  Paper,
+  Stack,
+  Text,
+  ThemeIcon,
+  Title,
+} from '@mantine/core';
 import { getAllLabs, getLabByRoute } from '@/lib/content';
-import { CATEGORY_LABEL, COMPLEXITY_LABEL } from '@/lib/types';
+import { CATEGORY_LABEL, COMPLEXITY_LABEL, type Lab } from '@/lib/types';
+import SiteHeader from '@/components/SiteHeader';
+
+const COMPLEXITY_COLOR: Record<Lab['complexity'], string> = {
+  'co-ban': 'teal',
+  'trung-cap': 'yellow',
+  'nang-cao': 'red',
+};
 
 export function generateStaticParams() {
   return getAllLabs().map((l) => ({ category: l.category, lab: l.id }));
@@ -17,124 +38,100 @@ export default async function LabPage({
   if (!lab) notFound();
 
   const totalSteps = lab.stages.reduce((n, s) => n + s.steps.length, 0);
+  const first = lab.stages.find((s) => s.steps.length > 0);
+  const firstStepHref = first ? `/${category}/${labId}/${first.id}/${first.steps[0].id}` : undefined;
 
   return (
-    <div style={{ maxWidth: 760, margin: '0 auto', padding: 28 }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 7,
-          fontSize: 13,
-          color: 'var(--color-text-secondary)',
-          marginBottom: 18,
-        }}
-      >
-        <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <i className="ti ti-home" style={{ fontSize: 15 }} />
-          Trang chủ
-        </Link>
-        <i className="ti ti-chevron-right" style={{ fontSize: 12 }} />
-        <span style={{ color: 'var(--color-text-primary)' }}>{CATEGORY_LABEL[category] ?? category}</span>
-      </div>
+    <>
+      <SiteHeader />
+      <Box style={{ borderBottom: '1px solid var(--mantine-color-gray-2)', background: 'var(--mantine-color-gray-0)' }}>
+        <Container size="md" py="xl">
+          <Breadcrumbs fz="sm" mb="md" separator="›">
+            <Anchor component={Link} href="/" c="dimmed">
+              Trang chủ
+            </Anchor>
+            <Anchor component={Link} href={`/${category}`} c="dimmed">
+              {CATEGORY_LABEL[category] ?? category}
+            </Anchor>
+            <Text>{lab.title}</Text>
+          </Breadcrumbs>
+          <Title order={1} mb="xs">
+            {lab.title}
+          </Title>
+          <Text c="dimmed" fz="md" lh={1.6} maw={680} mb="md">
+            {lab.description}
+          </Text>
+          <Group gap="sm">
+            <Badge color={COMPLEXITY_COLOR[lab.complexity]} variant="light" radius="sm">
+              {COMPLEXITY_LABEL[lab.complexity]}
+            </Badge>
+            <Text fz="sm" c="dimmed">
+              <i className="ti ti-clock" /> ~{lab.est_hours} giờ · {lab.stages.length} chặng · {totalSteps} bước
+            </Text>
+            {lab.repo_solution && (
+              <Anchor href={lab.repo_solution} fz="sm" target="_blank">
+                <i className="ti ti-brand-github" /> Repo mẫu lời giải
+              </Anchor>
+            )}
+          </Group>
+          {firstStepHref && (
+            <Button component={Link} href={firstStepHref} mt="lg" rightSection={<i className="ti ti-arrow-right" />}>
+              Bắt đầu Chặng 1
+            </Button>
+          )}
+        </Container>
+      </Box>
 
-      <h1 style={{ fontSize: 22, margin: '0 0 6px' }}>{lab.title}</h1>
-      <p style={{ fontSize: 16, lineHeight: 1.7, color: 'var(--color-text-secondary)', margin: '0 0 14px' }}>
-        {lab.description}
-      </p>
-      <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: 22, fontSize: 12 }}>
-        <Meta icon="ti-chart-bar">{COMPLEXITY_LABEL[lab.complexity]}</Meta>
-        <Meta icon="ti-clock">~{lab.est_hours} giờ</Meta>
-        <Meta icon="ti-stairs">
-          {lab.stages.length} chặng · {totalSteps} bước
-        </Meta>
-        {lab.repo_solution && (
-          <a
-            href={lab.repo_solution}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
-              color: 'var(--color-text-info)',
-              border: '0.5px solid var(--color-border-tertiary)',
-              borderRadius: 'var(--border-radius-md)',
-              padding: '3px 9px',
-            }}
-          >
-            <i className="ti ti-brand-github" style={{ fontSize: 14 }} />
-            Repo mẫu lời giải
-          </a>
-        )}
-      </div>
-
-      {lab.stages.map((stage) => (
-        <div key={stage.id} style={{ display: 'grid', gridTemplateColumns: '18px minmax(0,1fr)', gap: 14 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-            <span
-              style={{
-                width: 14,
-                height: 14,
-                borderRadius: '50%',
-                background: 'var(--color-background-tertiary)',
-                border: '0.5px solid var(--color-border-secondary)',
-              }}
-            />
-            <span style={{ flex: 1, width: 2, background: 'var(--color-border-tertiary)' }} />
-          </div>
-          <div style={{ paddingBottom: 18 }}>
-            <p style={{ fontSize: 13, fontWeight: 500, margin: '0 0 8px', color: 'var(--color-text-secondary)' }}>
-              Chặng {stage.order} · {stage.title}
-            </p>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {stage.steps.map((step) => (
-                <Link
-                  key={step.id}
-                  className="step-link"
-                  href={`/${category}/${labId}/${stage.id}/${step.id}`}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    fontSize: 13,
-                    border: '0.5px solid var(--color-border-tertiary)',
-                    borderRadius: 'var(--border-radius-md)',
-                    padding: '6px 11px',
-                    background: 'var(--color-background-primary)',
-                    color: 'var(--color-text-secondary)',
-                  }}
-                >
-                  <i className="ti ti-file-text" style={{ fontSize: 15, color: 'var(--color-text-tertiary)' }} />
-                  {step.title}
-                </Link>
-              ))}
-              {stage.steps.length === 0 && (
-                <span style={{ fontSize: 12.5, color: 'var(--color-text-tertiary)' }}>
-                  (đang biên soạn)
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function Meta({ icon, children }: { icon: string; children: React.ReactNode }) {
-  return (
-    <span
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 5,
-        color: 'var(--color-text-secondary)',
-        border: '0.5px solid var(--color-border-tertiary)',
-        borderRadius: 'var(--border-radius-md)',
-        padding: '3px 9px',
-      }}
-    >
-      <i className={`ti ${icon}`} style={{ fontSize: 14 }} />
-      {children}
-    </span>
+      <Container size="md" py="xl">
+        <Stack gap="lg">
+          {lab.stages.map((stage) => (
+            <Box key={stage.id}>
+              <Group gap="sm" mb="sm">
+                <ThemeIcon variant="light" radius="xl" size={28}>
+                  <Text fz="sm" fw={700}>
+                    {stage.order}
+                  </Text>
+                </ThemeIcon>
+                <Title order={4}>{stage.title}</Title>
+                {stage.description && (
+                  <Text c="dimmed" fz="sm" visibleFrom="sm">
+                    — {stage.description}
+                  </Text>
+                )}
+              </Group>
+              <Stack gap={6} pl={40}>
+                {stage.steps.map((step) => (
+                  <Paper
+                    key={step.id}
+                    component={Link}
+                    href={`/${category}/${labId}/${stage.id}/${step.id}`}
+                    className="lab-card"
+                    withBorder
+                    radius="md"
+                    px="md"
+                    py="xs"
+                  >
+                    <Group gap="sm" wrap="nowrap">
+                      <i className="ti ti-file-text" style={{ fontSize: 16, color: 'var(--mantine-color-dimmed)' }} />
+                      <Text fz="sm">{step.title}</Text>
+                      {step.est_minutes && (
+                        <Text fz="xs" c="dimmed" ml="auto">
+                          {step.est_minutes} phút
+                        </Text>
+                      )}
+                    </Group>
+                  </Paper>
+                ))}
+                {stage.steps.length === 0 && (
+                  <Text fz="sm" c="dimmed">
+                    (đang biên soạn)
+                  </Text>
+                )}
+              </Stack>
+            </Box>
+          ))}
+        </Stack>
+      </Container>
+    </>
   );
 }

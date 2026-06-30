@@ -8,6 +8,8 @@
     "start": "next start"
   },
   "dependencies": {
+    "@mantine/core": "^8.3.18",
+    "@mantine/hooks": "^8.3.18",
     "js-yaml": "^4.1.0",
     "mermaid": "^11.16.0",
     "next": "^15.0.0",
@@ -20,6 +22,9 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "postcss": "^8.5.16",
+    "postcss-preset-mantine": "^1.18.0",
+    "postcss-simple-vars": "^7.0.1",
     "typescript": "^5.7.0"
   }
 }
