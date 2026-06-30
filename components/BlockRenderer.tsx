@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Block } from '@/lib/types';
+import MermaidDiagram from './MermaidDiagram';
 
 // Markdown-lite: parse **đậm**, *nghiêng* và `inline-code` ra React nodes (an toàn, không innerHTML).
 // Không lồng nhau (parser 1 cấp): tránh viết `code` bên trong **bold**.
@@ -185,22 +186,8 @@ function OneBlock({ block }: { block: Block }) {
     case 'diagram':
       return (
         <div style={{ marginBottom: 14 }}>
-          <Label icon="ti-sitemap" text="Sơ đồ (Mermaid)" />
-          <pre
-            style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 12,
-              lineHeight: 1.6,
-              background: 'var(--color-background-secondary)',
-              border: '0.5px dashed var(--color-border-secondary)',
-              borderRadius: 'var(--border-radius-md)',
-              padding: '13px 15px',
-              overflow: 'auto',
-              color: 'var(--color-text-secondary)',
-            }}
-          >
-            <code>{block.content}</code>
-          </pre>
+          <Label icon="ti-sitemap" text="Sơ đồ" />
+          <MermaidDiagram code={block.content} />
         </div>
       );
 
