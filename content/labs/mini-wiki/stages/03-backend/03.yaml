@@ -1,13 +1,189 @@
 id: be-03
 title: Viết CRUD API cho Bài viết
 order: 3
-est_minutes: 45
-commit_ref: b7c8d9e
-goal: Viết 5 endpoint CRUD cho Bài viết.
-deliverable: api/src/routes/articles.ts chạy được, test bằng curl.
-outcome_preview: Bạn sẽ gọi được POST /api/articles và thấy bài vừa tạo trả về JSON.
+est_minutes: 50
+commit_ref: 5e7ee9c
+goal: Viết 5 endpoint CRUD cho Bài viết, kèm tự sinh slug và render Markdown an toàn (chống XSS).
+deliverable: api/src/controllers/articles.controller.ts + routes + 2 helper (slug, markdown); 5 endpoint hoạt động.
+outcome_preview: Bạn sẽ gọi được POST /api/articles tạo bài mới và GET /api/articles/:slug nhận về JSON kèm HTML đã render an toàn.
 blocks:
 - type: prose
-  content: Express Router gom các endpoint liên quan vào một file cho gọn.
+  content: |
+    Đây là bước nhiều thịt nhất Chặng 3: viết đủ **CRUD** (Create-Read-Update-Delete) cho Bài viết. Trước hết, 2 helper nhỏ nhưng quan trọng.
+
+    Helper **slug** dùng thư viện `slugify` với `locale: 'vi'` để bỏ dấu tiếng Việt đúng:
 - type: command
-  content: 'curl -X POST localhost:3000/api/articles -H ''Content-Type: application/json'' -d ''{"title":"Test"}'''
+  label: Cài thêm thư viện xử lý nội dung
+  content: cd api && npm install slugify marked isomorphic-dompurify
+- type: code
+  filename: api/src/lib/slug.ts
+  lang: typescript
+  content: |
+    import slugify from 'slugify';
+
+    // toSlug: chuyển văn bản (kể cả tiếng Việt) → slug URL-safe
+    // locale 'vi' → bỏ dấu đúng ("học" → "hoc"), strict → xóa ký tự đặc biệt
+    export function toSlug(text: string): string {
+      return slugify(text, { lower: true, locale: 'vi', strict: true });
+    }
+- type: prose
+  content: |
+    Helper **markdown** là tuyến phòng thủ XSS. `marked` chuyển Markdown → HTML, nhưng HTML thô có thể chứa `<script>` độc hại — `DOMPurify` làm sạch trước khi trả về:
+- type: code
+  filename: api/src/lib/markdown.ts
+  lang: typescript
+  content: |
+    import DOMPurify from 'isomorphic-dompurify';
+    import { marked } from 'marked';
+
+    // Markdown → HTML an toàn: marked.parse render HTML thô, DOMPurify loại bỏ
+    // tag/attr nguy hiểm (script, onclick, iframe...). Bỏ bước này → dính XSS.
+    export async function renderMarkdown(md: string): Promise<string> {
+      const html = await marked.parse(md);
+      return DOMPurify.sanitize(html);
+    }
+- type: prose
+  content: |
+    Giờ tới controller — chứa logic 5 endpoint. Lưu ý cách `formatArticle` (có content) và `formatListItem` (không content, cho danh sách) khác nhau, đúng hợp đồng API ở Chặng 1:
+- type: code
+  filename: api/src/controllers/articles.controller.ts
+  lang: typescript
+  content: |
+    import type { Request, Response } from 'express';
+    import { Prisma } from '@prisma/client';
+    import { AppError } from '../middleware/errorHandler.js';
+    import { prisma } from '../lib/prisma.js';
+    import { toSlug } from '../lib/slug.js';
+    import { renderMarkdown } from '../lib/markdown.js';
+
+    const ARTICLE_INCLUDE = { tags: { include: { tag: true } } } as const;
+    type ArticleWithTags = Prisma.ArticleGetPayload<{ include: typeof ARTICLE_INCLUDE }>;
+
+    const mapTags = (tags: ArticleWithTags['tags']) =>
+      tags.map((at) => ({ id: at.tag.id, name: at.tag.name, slug: at.tag.slug }));
+
+    function formatArticle(a: ArticleWithTags, contentHtml?: string) {
+      return {
+        id: a.id, title: a.title, slug: a.slug, content: a.content,
+        ...(contentHtml !== undefined && { content_html: contentHtml }),
+        published_at: a.publishedAt, created_at: a.createdAt, updated_at: a.updatedAt,
+        tags: mapTags(a.tags),
+      };
+    }
+    const formatListItem = (a: ArticleWithTags) => ({
+      id: a.id, title: a.title, slug: a.slug, published_at: a.publishedAt, tags: mapTags(a.tags),
+    });
+
+    // A1 — GET /api/articles  (danh sách, có lọc tag + phân trang)
+    export async function list(req: Request, res: Response) {
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const tagSlug = req.query.tag as string | undefined;
+      const where: Prisma.ArticleWhereInput = tagSlug
+        ? { tags: { some: { tag: { slug: tagSlug } } } } : {};
+      const [total, articles] = await Promise.all([
+        prisma.article.count({ where }),
+        prisma.article.findMany({
+          where,
+          orderBy: [{ publishedAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }],
+          skip: (page - 1) * limit, take: limit, include: ARTICLE_INCLUDE,
+        }),
+      ]);
+      res.json({ data: articles.map(formatListItem), meta: { total, page, limit } });
+    }
+
+    // A3 — GET /api/articles/:slug  (chi tiết, kèm HTML đã render)
+    export async function getBySlug(req: Request, res: Response) {
+      const slug = String(req.params.slug);
+      const article = await prisma.article.findUnique({ where: { slug }, include: ARTICLE_INCLUDE });
+      if (!article) throw new AppError(404, 'ARTICLE_NOT_FOUND', `Không tìm thấy bài '${slug}'.`);
+      const contentHtml = await renderMarkdown(article.content);
+      res.json(formatArticle(article, contentHtml));
+    }
+
+    // A2 — POST /api/articles
+    export async function create(req: Request, res: Response) {
+      const { title, content, published_at, tagIds } = req.body;
+      if (!title?.trim()) throw new AppError(400, 'MISSING_FIELD', "Thiếu 'title'.");
+      if (!content?.trim()) throw new AppError(400, 'MISSING_FIELD', "Thiếu 'content'.");
+      const article = await prisma.article.create({
+        data: {
+          title, slug: toSlug(title), content,
+          publishedAt: published_at ? new Date(published_at) : null,
+          tags: tagIds?.length ? { create: tagIds.map((tagId: number) => ({ tagId })) } : undefined,
+        },
+        include: ARTICLE_INCLUDE,
+      });
+      res.status(201).json(formatArticle(article));
+    }
+
+    // A4 — PUT /api/articles/:slug  (mọi trường tùy chọn)
+    export async function update(req: Request, res: Response) {
+      const slug = String(req.params.slug);
+      const existing = await prisma.article.findUnique({ where: { slug } });
+      if (!existing) throw new AppError(404, 'ARTICLE_NOT_FOUND', `Không tìm thấy bài '${slug}'.`);
+      const body = req.body;
+      const data: Prisma.ArticleUpdateInput = {};
+      if (body.title !== undefined) { data.title = body.title; data.slug = toSlug(body.title); }
+      if (body.content !== undefined) data.content = body.content;
+      // 'in' để phân biệt "không gửi field" vs "gửi null" (chuyển về bản nháp)
+      if ('published_at' in body) data.publishedAt = body.published_at ? new Date(body.published_at) : null;
+      if (body.tagIds !== undefined)
+        data.tags = { deleteMany: {}, create: body.tagIds.map((tagId: number) => ({ tagId })) };
+      const article = await prisma.article.update({
+        where: { id: existing.id }, data, include: ARTICLE_INCLUDE,
+      });
+      res.json(formatArticle(article));
+    }
+
+    // A5 — DELETE /api/articles/:slug  (ArticleTag tự xóa cascade)
+    export async function remove(req: Request, res: Response) {
+      const slug = String(req.params.slug);
+      const existing = await prisma.article.findUnique({ where: { slug } });
+      if (!existing) throw new AppError(404, 'ARTICLE_NOT_FOUND', `Không tìm thấy bài '${slug}'.`);
+      await prisma.article.delete({ where: { id: existing.id } });
+      res.status(204).send();
+    }
+- type: prose
+  content: |
+    Gom 5 handler vào một router, rồi gắn vào `index.ts`:
+- type: code
+  filename: api/src/routes/articles.routes.ts
+  lang: typescript
+  content: |
+    import { Router } from 'express';
+    import * as articles from '../controllers/articles.controller.js';
+
+    const router = Router();
+    router.get('/', articles.list);
+    router.post('/', articles.create);
+    router.get('/:slug', articles.getBySlug);
+    router.put('/:slug', articles.update);
+    router.delete('/:slug', articles.remove);
+    export default router;
+- type: code
+  filename: api/src/index.ts (thêm 2 dòng)
+  lang: typescript
+  content: |
+    import articlesRouter from './routes/articles.routes.js';
+    // ... sau app.use(morgan('dev')):
+    app.use('/api/articles', articlesRouter);
+- type: callout
+  variant: warning
+  content: |
+    **Đừng bao giờ trả thẳng HTML từ Markdown người dùng mà chưa sanitize.** Nếu ai đó tạo bài viết với nội dung `<script>steal()</script>`, mà bạn render thẳng, đoạn script sẽ chạy trên trình duyệt người đọc — đó là **XSS (Cross-Site Scripting)**. `DOMPurify.sanitize()` ở `renderMarkdown` chính là lá chắn: nó cắt sạch script/event-handler trước khi HTML rời server.
+- type: callout
+  variant: info
+  content: |
+    **Một tiểu tiết TypeScript đáng nhớ:** `req.params.slug` trong Express 5 có kiểu `string | string[]` chứ không chỉ `string`. Phải bọc `String(req.params.slug)` để "thu hẹp kiểu" — nếu không, `tsc` (lúc build ở Chặng 6) sẽ báo lỗi, dù chạy `dev` vẫn ổn. Đây là lý do ta luôn build chứ không chỉ chạy dev.
+- type: command
+  label: Test nhanh + lưu mốc bước 3.3
+  content: |
+    curl localhost:3000/api/articles | head
+    curl -X POST localhost:3000/api/articles -H 'Content-Type: application/json' \
+      -d '{"title":"Bài thử","content":"## Xin chào"}'
+    git add api/src && git commit -m "[step-3.3] Articles CRUD + slug + markdown an toàn"
+- type: resource
+  label: Commit đối chiếu (step-3.3)
+  url: https://github.com/KouTaru99/mini-wiki/commit/5e7ee9c
+  kind: docs

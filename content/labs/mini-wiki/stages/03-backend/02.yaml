@@ -1,35 +1,123 @@
 id: be-02
-title: Thiết kế & tạo schema cơ sở dữ liệu
+title: Chạy PostgreSQL + áp schema + seed dữ liệu
 order: 2
-est_minutes: 45
-commit_ref: d4e5f6a
-goal: Tạo 3 bảng cơ sở dữ liệu để lưu Bài viết, Tag và quan hệ giữa chúng. Copy đúng các lệnh bên dưới
-  là xong — chưa cần tự nghĩ cấu trúc.
-deliverable: 3 bảng articles, tags, article_tags đã có trong CSDL.
-outcome_preview: Gõ \dt trong CSDL hiện ra đúng 3 bảng vừa tạo.
+est_minutes: 40
+commit_ref: c806de4
+goal: Dựng PostgreSQL bằng Docker, áp migration tạo 3 bảng, và nạp dữ liệu mẫu để có cái mà thử.
+deliverable: docker-compose.yml (service db) + api/prisma/seed.ts; DB có 3 bảng + 4 tag + 3 bài viết.
+outcome_preview: Bạn sẽ có một database PostgreSQL chạy thật, đã đầy dữ liệu mẫu, sẵn sàng cho API truy vấn.
 blocks:
 - type: prose
-  content: Mini-Wiki cần lưu bài viết và các tag gắn vào bài. Một bài có nhiều tag, một tag thuộc nhiều
-    bài — đây là quan hệ nhiều-nhiều, cần một bảng nối.
+  content: |
+    Schema ở Chặng 2 mới là file `.prisma` — chưa có database thật. Bước này ta: (1) chạy PostgreSQL bằng **Docker** (không phải cài trực tiếp lên máy), (2) áp migration tạo bảng, (3) nạp **dữ liệu mẫu** để có cái mà thử ở các bước sau.
+- type: prose
+  content: |
+    Tạo `docker-compose.yml` ở thư mục gốc dự án. Chú ý `healthcheck` — Docker dùng nó để biết DB đã sẵn sàng nhận kết nối chưa:
+- type: code
+  filename: docker-compose.yml
+  lang: yaml
+  content: |
+    services:
+      # service api + web sẽ thêm ở Chặng 6
+      db:
+        image: postgres:16-alpine
+        environment:
+          POSTGRES_DB: miniwiki
+          POSTGRES_USER: dev
+          POSTGRES_PASSWORD: dev
+        ports:
+          - '5432:5432'
+        volumes:
+          - pgdata:/var/lib/postgresql/data
+        healthcheck:
+          test: ['CMD-SHELL', 'pg_isready -U dev -d miniwiki']
+          interval: 5s
+          timeout: 5s
+          retries: 5
+
+    volumes:
+      pgdata:
+- type: command
+  label: Chạy DB + tạo file .env + áp schema
+  content: |
+    docker compose up -d db          # khởi động PostgreSQL (chờ healthy)
+    cd api
+    cp .env.example .env             # tạo .env thật từ mẫu
+    npx prisma generate              # sinh Prisma Client (TypeScript types)
+    npx prisma migrate deploy        # áp migration 0001_init -> tạo 3 bảng
+- type: prose
+  content: |
+    Giờ viết `api/prisma/seed.ts` để nạp dữ liệu mẫu. Điểm đáng học ở đây là hàm **slugify** chuyển tiêu đề tiếng Việt thành slug ASCII (bỏ dấu, thay khoảng trắng bằng `-`):
+- type: code
+  filename: api/prisma/seed.ts
+  lang: typescript
+  content: |
+    import { PrismaClient } from '@prisma/client';
+    const prisma = new PrismaClient();
+
+    // Tiêu đề tiếng Việt -> slug ASCII (bỏ dấu, thay khoảng trắng = '-')
+    function slugify(text: string): string {
+      return text
+        .replace(/đ/g, 'd').replace(/Đ/g, 'D')
+        .normalize('NFD').replace(/[̀-ͯ]/g, '') // bỏ dấu tổ hợp
+        .toLowerCase().trim()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-').replace(/-+/g, '-');
+    }
+
+    const TAGS = [
+      { name: 'JavaScript', slug: 'javascript' },
+      { name: 'Git',        slug: 'git' },
+      { name: 'DevOps',     slug: 'devops' },
+      { name: 'PostgreSQL', slug: 'postgresql' },
+    ] as const;
+
+    // ARTICLES: 3 bài viết mẫu (title + content Markdown + tags).
+    // Xem nội dung đầy đủ ở commit đối chiếu bên dưới.
+    const ARTICLES = [ /* ... 3 bài, mỗi bài { title, content, publishedAt, tags } ... */ ];
+
+    async function main() {
+      // 1. Upsert tags (slug là unique key -> chạy lại không tạo trùng)
+      const tagMap = new Map<string, number>();
+      for (const t of TAGS) {
+        const tag = await prisma.tag.upsert({ where: { slug: t.slug }, update: {}, create: t });
+        tagMap.set(t.slug, tag.id);
+      }
+      // 2. Upsert articles + gắn tag (xóa link cũ rồi tạo lại -> idempotent)
+      for (const data of ARTICLES as any[]) {
+        const slug = slugify(data.title);
+        const article = await prisma.article.upsert({
+          where: { slug },
+          update: { title: data.title, content: data.content, publishedAt: data.publishedAt },
+          create: { title: data.title, slug, content: data.content, publishedAt: data.publishedAt },
+        });
+        await prisma.articleTag.deleteMany({ where: { articleId: article.id } });
+        for (const tagSlug of data.tags) {
+          const tagId = tagMap.get(tagSlug);
+          if (tagId) await prisma.articleTag.create({ data: { articleId: article.id, tagId } });
+        }
+      }
+    }
+
+    main()
+      .catch((e) => { console.error('Seed thất bại:', e); process.exit(1); })
+      .finally(() => prisma.$disconnect());
+- type: command
+  label: Nạp dữ liệu + lưu mốc bước 3.2
+  content: |
+    npm run seed                     # chạy prisma/seed.ts
+    # kiểm tra: docker exec -it <db> psql -U dev -d miniwiki -c "\dt"  -> 3 bảng
+    git add ../docker-compose.yml prisma/seed.ts
+    git commit -m "[step-3.2] Prisma client + docker-compose(db) + migrate + seed"
 - type: callout
   variant: info
-  content: Bảng nối giống một quyển sổ ghi 'bài nào — tag nào', mỗi dòng là một cặp.
-- type: diagram
-  content: "erDiagram\n  ARTICLES ||--o{ ARTICLE_TAGS : \"\"\n  TAGS ||--o{ ARTICLE_TAGS : \"\""
-- type: code
-  lang: sql
-  filename: db/schema.sql
-  content: "CREATE TABLE articles (\n  id          SERIAL       PRIMARY KEY,\n  title       VARCHAR(255)\
-    \ NOT NULL,\n  slug        VARCHAR(255) NOT NULL UNIQUE,\n  content     TEXT         NOT NULL,\n \
-    \ created_at  TIMESTAMPTZ  DEFAULT now()\n);"
-- type: prose
-  content: 'Khởi động PostgreSQL bằng Docker để có nơi chạy các lệnh trên:'
-- type: command
-  content: docker compose up -d db
-- type: prose
-  content: 'Kết quả mong đợi: terminal in `Container db Started` — CSDL đã chạy, sẵn sàng nhận lệnh tạo
-    bảng.'
+  content: |
+    **Vì sao dùng upsert thay vì create trong seed?** `upsert` = "update nếu đã có, create nếu chưa". Nhờ vậy bạn chạy `npm run seed` **nhiều lần** mà không bị lỗi trùng slug hay nhân đôi dữ liệu — gọi là *idempotent* (chạy bao nhiêu lần kết quả vẫn như nhau). Một seed script tốt luôn nên idempotent.
 - type: callout
   variant: warning
-  content: Đừng nhét tag vào một cột text của bài viết (vd 'java,web') — sẽ không lọc/đếm theo tag được.
-    Luôn tách bảng nối article_tags.
+  content: |
+    **published_at phải nullable thật.** Nếu ở bước trước bạn lỡ để migration `DEFAULT NOW()`, bài "nháp" (publishedAt = null) sẽ không tạo được đúng. Kiểm tra nhanh trong DB: cột `published_at` phải cho phép NULL.
+- type: resource
+  label: Commit đối chiếu — seed.ts đầy đủ 3 bài (step-3.2)
+  url: https://github.com/KouTaru99/mini-wiki/commit/c806de4
+  kind: docs

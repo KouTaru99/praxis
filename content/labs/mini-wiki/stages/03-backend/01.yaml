@@ -2,15 +2,192 @@ id: be-01
 title: Khởi tạo project Express + TypeScript
 order: 1
 est_minutes: 30
-commit_ref: a1b2c3d
-goal: Dựng bộ khung server Express bằng TypeScript.
-deliverable: api/ chạy được, mở http://localhost:3000 trả về 'OK'.
-outcome_preview: Bạn sẽ thấy server in ra 'listening on 3000' khi chạy.
+commit_ref: c6640f1
+goal: Dựng bộ khung server Express bằng TypeScript, với xử lý lỗi tập trung ngay từ đầu.
+deliverable: Thư mục api/ chạy được; GET /health trả JSON status ok.
+outcome_preview: Bạn sẽ gọi http://localhost:3000/health và nhận về JSON trạng thái ok — server đã sống.
 blocks:
 - type: prose
-  content: Khởi tạo project Node + TypeScript và cài Express.
+  content: |
+    Hết giai đoạn giấy tờ — giờ **viết code thật**. Ta dựng khung Back-end trong thư mục `api/`: Express 5 + TypeScript, kèm sẵn **xử lý lỗi tập trung** để không bao giờ "nuốt lỗi thầm" (NFR-8).
 - type: command
-  content: npm init -y && npm install express && npm install -D typescript @types/express tsx
+  label: Tạo thư mục api/ và cài dependencies
+  content: |
+    mkdir api && cd api
+    npm init -y
+    npm install express cors morgan dotenv @prisma/client
+    npm install -D typescript tsx prisma @types/express @types/cors @types/morgan @types/node
+- type: prose
+  content: |
+    Cấu hình `package.json` — chú ý `"type": "module"` (dùng ES Module) và các script tiện cho Prisma:
+- type: code
+  filename: api/package.json
+  lang: json
+  content: |
+    {
+      "name": "miniwiki-api",
+      "version": "0.1.0",
+      "type": "module",
+      "scripts": {
+        "dev": "NODE_ENV=development tsx watch src/index.ts",
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "migrate": "prisma migrate deploy",
+        "seed": "prisma db seed",
+        "generate": "prisma generate"
+      },
+      "prisma": { "seed": "tsx prisma/seed.ts" }
+    }
+- type: code
+  filename: api/tsconfig.json
+  lang: json
+  content: |
+    {
+      "compilerOptions": {
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "strict": true,
+        "esModuleInterop": true,
+        "outDir": "dist",
+        "rootDir": "src",
+        "skipLibCheck": true
+      },
+      "include": ["src/**/*"],
+      "exclude": ["node_modules", "dist"]
+    }
+- type: prose
+  content: |
+    Tạo một **Prisma client dùng chung** (singleton). Mẹo `globalThis` ngăn `tsx watch` tạo nhiều kết nối mỗi lần hot-reload:
+- type: code
+  filename: api/src/lib/prisma.ts
+  lang: typescript
+  content: |
+    import { PrismaClient } from '@prisma/client';
+
+    // globalThis cache: ngăn tsx watch tạo nhiều PrismaClient khi hot-reload
+    const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+
+    export const prisma =
+      globalForPrisma.prisma ??
+      new PrismaClient({
+        log: process.env.NODE_ENV === 'development' ? ['query'] : [],
+      });
+
+    if (process.env.NODE_ENV !== 'production') {
+      globalForPrisma.prisma = prisma;
+    }
+- type: prose
+  content: |
+    Đây là phần quan trọng nhất bước này: **middleware xử lý lỗi tập trung**. Thay vì mỗi controller tự `try/catch` rồi trả lỗi mỗi kiểu, ta gom về một chỗ — map lỗi Prisma (slug trùng, không tìm thấy, tag đang dùng) sang đúng HTTP code, mọi lỗi lạ đều log ra stderr:
+- type: code
+  filename: api/src/middleware/errorHandler.ts
+  lang: typescript
+  content: |
+    import { Prisma } from '@prisma/client';
+    import type { NextFunction, Request, Response } from 'express';
+
+    // AppError: lỗi có chủ ý từ business logic (controller ném ra thay vì lỗi Prisma thô)
+    export class AppError extends Error {
+      constructor(
+        public readonly statusCode: number,
+        public readonly code: string,
+        message: string,
+      ) {
+        super(message);
+        this.name = 'AppError';
+      }
+    }
+
+    // Error middleware của Express PHẢI có đủ 4 tham số (err, req, res, next)
+    export function errorHandler(
+      err: unknown,
+      _req: Request,
+      res: Response,
+      _next: NextFunction,
+    ): void {
+      if (err instanceof AppError) {
+        res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
+        return;
+      }
+
+      if (err instanceof Prisma.PrismaClientKnownRequestError) {
+        if (err.code === 'P2002') {
+          const target = (err.meta?.target as string[] | undefined) ?? [];
+          const code = target.some((f) => f.includes('slug')) ? 'SLUG_CONFLICT' : 'TAG_NAME_CONFLICT';
+          res.status(409).json({ error: { code, message: `Giá trị đã tồn tại: ${target.join(', ')}.` } });
+          return;
+        }
+        if (err.code === 'P2025') {
+          res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Không tìm thấy bản ghi.' } });
+          return;
+        }
+        if (err.code === 'P2003') {
+          res.status(409).json({ error: { code: 'TAG_IN_USE', message: 'Tag đang gắn bài viết, không thể xóa.' } });
+          return;
+        }
+      }
+
+      console.error('[ERROR 500]', err); // NFR-8: không nuốt lỗi thầm
+      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Đã xảy ra lỗi phía server.' } });
+    }
+- type: prose
+  content: |
+    Thêm `notFound` bắt mọi route lạ, rồi ráp tất cả vào `src/index.ts` — điểm khởi động server:
+- type: code
+  filename: api/src/middleware/notFound.ts
+  lang: typescript
+  content: |
+    import type { Request, Response } from 'express';
+
+    export function notFound(req: Request, res: Response): void {
+      res.status(404).json({
+        error: { code: 'ROUTE_NOT_FOUND', message: `Route không tồn tại: ${req.method} ${req.path}` },
+      });
+    }
+- type: code
+  filename: api/src/index.ts
+  lang: typescript
+  content: |
+    import 'dotenv/config';
+    import cors from 'cors';
+    import express from 'express';
+    import morgan from 'morgan';
+    import { errorHandler } from './middleware/errorHandler.js';
+    import { notFound } from './middleware/notFound.js';
+
+    const app = express();
+    const port = process.env.PORT ?? 3000;
+
+    app.use(cors({ origin: process.env.CORS_ORIGIN }));
+    app.use(express.json());
+    app.use(morgan('dev'));
+
+    // Health check — verify server sống (không cần DB)
+    app.get('/health', (_req, res) => {
+      res.json({ status: 'ok', time: new Date().toISOString() });
+    });
+
+    // routes articles/tags/search — thêm ở bước 3.3-3.5
+
+    // Fallback — đặt CUỐI, sau tất cả router
+    app.use(notFound);
+    app.use(errorHandler);
+
+    app.listen(port, () => {
+      console.log(`[mini-wiki] API chạy tại http://localhost:${port}`);
+    });
 - type: callout
-  variant: tip
-  content: Nếu thiếu lệnh node, cài Node 20 LTS từ nodejs.org trước.
+  variant: warning
+  content: |
+    **Vì sao errorHandler phải có đúng 4 tham số (err, req, res, next)?** Express phân biệt *error middleware* với middleware thường **dựa vào số tham số**: hàm 4 tham số được Express coi là handler lỗi. Nếu bạn lỡ bỏ tham số `next` (dù không dùng tới), Express không gọi nó khi có lỗi — và lỗi rơi vào im lặng. Đây là một "gotcha" kinh điển của Express.
+- type: command
+  label: Chạy thử + lưu mốc bước 3.1
+  content: |
+    npm run dev
+    # mở tab khác: curl http://localhost:3000/health  ->  {"status":"ok",...}
+    git add api && git commit -m "[step-3.1] scaffold Express 5 + TypeScript"
+- type: resource
+  label: Commit đối chiếu (step-3.1)
+  url: https://github.com/KouTaru99/mini-wiki/commit/c6640f1
+  kind: docs
