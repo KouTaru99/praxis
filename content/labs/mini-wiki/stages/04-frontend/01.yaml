@@ -1,12 +1,169 @@
 id: fe-01
-title: Khởi tạo React + Vite
+title: Khởi tạo React + Vite + API client
 order: 1
-est_minutes: 25
-goal: Dựng bộ khung frontend React bằng Vite.
-deliverable: web/ chạy, mở http://localhost:5173 thấy trang trắng có tiêu đề.
-outcome_preview: Bạn sẽ thấy trang React chạy với hot-reload.
+est_minutes: 30
+commit_ref: bd919af
+goal: Dựng khung front-end React 18 + Vite 6, định nghĩa kiểu dữ liệu và lớp gọi API có kiểu.
+deliverable: Thư mục web/ chạy được; types.ts + lib/api.ts khớp hợp đồng API backend.
+outcome_preview: Bạn sẽ mở http://localhost:5173 và thấy trang React chạy với hot-reload, sẵn sàng gọi backend.
 blocks:
 - type: prose
-  content: Vite cho trải nghiệm dev nhanh, hot-reload gần như tức thì.
+  content: |
+    Backend đã chạy — giờ dựng **front-end** trong thư mục `web/`. Ta dùng **Vite** (build tool siêu nhanh, hot-reload ~50ms) + **React 18** + **react-router-dom** để điều hướng. Điểm nhấn bước này là một **lớp gọi API có kiểu** (`lib/api.ts`) khớp đúng hợp đồng đã định ở backend.
 - type: command
-  content: npm create vite@latest web -- --template react-ts
+  label: Tạo project Vite + cài router
+  content: |
+    npm create vite@latest web -- --template react-ts
+    cd web
+    npm install
+    npm install react-router-dom
+- type: code
+  filename: web/package.json
+  lang: json
+  content: |
+    {
+      "name": "miniwiki-web",
+      "type": "module",
+      "scripts": {
+        "dev": "vite",
+        "build": "tsc -b && vite build",
+        "preview": "vite preview"
+      },
+      "dependencies": {
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "react-router-dom": "^6.26.2"
+      }
+    }
+- type: code
+  filename: web/vite.config.ts
+  lang: typescript
+  content: |
+    import { defineConfig } from 'vite';
+    import react from '@vitejs/plugin-react';
+
+    export default defineConfig({
+      plugins: [react()],
+      server: { port: 5173 },
+    });
+- type: prose
+  content: |
+    Khai báo **kiểu dữ liệu** khớp với response backend. Chú ý `ArticleListItem` (danh sách, không content) khác `Article` (chi tiết, có `content_html` đã sanitize):
+- type: code
+  filename: web/src/types.ts
+  lang: typescript
+  content: |
+    export interface TagSummary { id: number; name: string; slug: string; }
+    export interface Tag extends TagSummary { created_at: string; }
+
+    // GET /api/articles — không có content để giảm payload
+    export interface ArticleListItem {
+      id: number; title: string; slug: string;
+      published_at: string | null;
+      tags: TagSummary[];
+    }
+
+    // GET /api/articles/:slug — đầy đủ, content_html đã qua DOMPurify (an toàn)
+    export interface Article extends ArticleListItem {
+      content: string;
+      content_html: string;
+      created_at: string;
+      updated_at: string;
+    }
+
+    export interface Paginated<T> {
+      data: T[];
+      meta: { total: number; page: number; limit: number; query?: string };
+    }
+- type: prose
+  content: |
+    Lớp gọi API — mỗi hàm có kiểu trả về rõ ràng, và đọc lỗi từ cấu trúc `{ error: { message } }` của backend:
+- type: code
+  filename: web/src/lib/api.ts
+  lang: typescript
+  content: |
+    import type { Article, ArticleListItem, Paginated, Tag } from '../types';
+
+    const BASE_URL = import.meta.env.VITE_API_URL as string;
+
+    async function apiGet<T>(path: string): Promise<T> {
+      const res = await fetch(`${BASE_URL}${path}`);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+        throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+      }
+      return res.json() as Promise<T>;
+    }
+
+    export function listArticles(params?: { tag?: string; page?: number }) {
+      const qs = new URLSearchParams();
+      if (params?.tag) qs.set('tag', params.tag);
+      if (params?.page && params.page > 1) qs.set('page', String(params.page));
+      const query = qs.toString();
+      return apiGet<Paginated<ArticleListItem>>(`/articles${query ? `?${query}` : ''}`);
+    }
+    export const getArticle = (slug: string) =>
+      apiGet<Article>(`/articles/${encodeURIComponent(slug)}`);
+    export const listTags = () => apiGet<Tag[]>('/tags');
+    export const searchArticles = (q: string, page?: number) => {
+      const qs = new URLSearchParams({ q });
+      if (page && page > 1) qs.set('page', String(page));
+      return apiGet<Paginated<ArticleListItem>>(`/search?${qs.toString()}`);
+    };
+- type: prose
+  content: |
+    Cuối cùng, ráp router vào `main.tsx` + `App.tsx`, một `Layout` chung, và file `.env`:
+- type: code
+  filename: web/src/main.tsx
+  lang: typescript
+  content: |
+    import { StrictMode } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { BrowserRouter } from 'react-router-dom';
+    import './index.css';
+    import App from './App';
+
+    const root = document.getElementById('root');
+    if (!root) throw new Error('Không tìm thấy #root');
+
+    createRoot(root).render(
+      <StrictMode>
+        <BrowserRouter><App /></BrowserRouter>
+      </StrictMode>,
+    );
+- type: code
+  filename: web/src/App.tsx
+  lang: typescript
+  content: |
+    import { Routes, Route } from 'react-router-dom';
+    import Layout from './components/Layout';
+
+    export default function App() {
+      return (
+        <Routes>
+          <Route element={<Layout />}>
+            {/* Trang danh sách + chi tiết thêm ở Bước 4.2, 4.3 */}
+            <Route path="/" element={<p>Đang xây dựng…</p>} />
+          </Route>
+        </Routes>
+      );
+    }
+- type: code
+  filename: web/.env.example
+  lang: bash
+  content: |
+    VITE_API_URL=http://localhost:3000/api
+- type: callout
+  variant: warning
+  content: |
+    **Đừng quên file src/vite-env.d.ts** với nội dung `/// <reference types="vite/client" />`. File một dòng này khai báo kiểu cho `import.meta.env` — thiếu nó, lệnh `npm run build` (`tsc -b && vite build`) sẽ báo lỗi không nhận ra `import.meta.env`, dù `npm run dev` vẫn chạy bình thường. Một lần nữa: luôn **build** chứ không chỉ chạy dev.
+- type: command
+  label: Tạo .env + chạy + lưu mốc bước 4.1
+  content: |
+    cp .env.example .env
+    npm run dev    # mở http://localhost:5173
+    git add . && git commit -m "[step-4.1] scaffold React 18 + Vite 6 + Router + API client"
+- type: resource
+  label: Commit đối chiếu (step-4.1)
+  url: https://github.com/KouTaru99/mini-wiki/commit/bd919af
+  kind: docs

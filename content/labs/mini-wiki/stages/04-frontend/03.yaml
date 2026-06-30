@@ -1,0 +1,108 @@
+id: fe-03
+title: Trang chi tiết bài viết
+order: 3
+est_minutes: 35
+commit_ref: 98f453a
+goal: Hiển thị toàn văn một bài viết, render HTML đã sanitize từ backend.
+deliverable: ArticleDetailPage tại route /articles/:slug; nội dung Markdown hiện đúng định dạng.
+outcome_preview: Bạn sẽ bấm vào một bài ở danh sách và đọc toàn văn — heading, code block, đậm/nghiêng đều hiển thị đẹp.
+blocks:
+- type: prose
+  content: |
+    Trang chi tiết đọc `slug` từ URL (qua `useParams`), gọi `getArticle(slug)`, rồi hiển thị nội dung. Điểm quan trọng nhất: backend trả về `content_html` — HTML **đã render và đã sanitize** (Chặng 3, bước be-03). Vì vậy front-end có thể dùng `dangerouslySetInnerHTML` một cách *an toàn*.
+- type: code
+  filename: web/src/pages/ArticleDetailPage.tsx
+  lang: typescript
+  content: |
+    import { useEffect, useState } from 'react';
+    import { useParams, Link } from 'react-router-dom';
+    import type { Article } from '../types';
+    import { getArticle } from '../lib/api';
+
+    function formatDate(iso: string): string {
+      return new Date(iso).toLocaleDateString('vi-VN', {
+        day: 'numeric', month: 'long', year: 'numeric',
+      });
+    }
+
+    export default function ArticleDetailPage() {
+      const { slug } = useParams<{ slug: string }>();
+      const [state, setState] = useState<
+        | { status: 'loading' }
+        | { status: 'notfound' }
+        | { status: 'error'; message: string }
+        | { status: 'ok'; article: Article }
+      >({ status: 'loading' });
+
+      useEffect(() => {
+        if (!slug) return;
+        let cancelled = false;
+        getArticle(slug)
+          .then((article) => { if (!cancelled) setState({ status: 'ok', article }); })
+          .catch((err: unknown) => {
+            if (cancelled) return;
+            const message = err instanceof Error ? err.message : 'Lỗi không xác định';
+            if (message.includes('ARTICLE_NOT_FOUND') || message.includes('404'))
+              setState({ status: 'notfound' });
+            else setState({ status: 'error', message });
+          });
+        return () => { cancelled = true; };
+      }, [slug]);
+
+      if (state.status === 'loading') return <p className="state-msg">Đang tải…</p>;
+      if (state.status === 'notfound')
+        return (
+          <div>
+            <Link to="/" className="back-link">← Về danh sách</Link>
+            <p className="state-msg">Không tìm thấy bài viết.</p>
+          </div>
+        );
+      if (state.status === 'error')
+        return (
+          <div>
+            <Link to="/" className="back-link">← Về danh sách</Link>
+            <p className="state-msg error">Lỗi: {state.message}</p>
+          </div>
+        );
+
+      const { article } = state;
+      return (
+        <article className="article-detail">
+          <Link to="/" className="back-link">← Về danh sách</Link>
+          <div className="article-header">
+            <h1 className="article-title">{article.title}</h1>
+            {article.published_at && (
+              <div className="article-meta">Đăng ngày {formatDate(article.published_at)}</div>
+            )}
+            {article.tags.length > 0 && (
+              <div className="tag-list">
+                {article.tags.map((t) => <span key={t.id} className="tag-chip">{t.name}</span>)}
+              </div>
+            )}
+          </div>
+          {/* content_html đã sanitize ở backend -> an toàn dùng dangerouslySetInnerHTML */}
+          <div className="article-content"
+               dangerouslySetInnerHTML={{ __html: article.content_html }} />
+        </article>
+      );
+    }
+- type: code
+  filename: web/src/App.tsx (thêm route chi tiết)
+  lang: typescript
+  content: |
+    import ArticleDetailPage from './pages/ArticleDetailPage';
+    // trong <Route element={<Layout />}>:
+    <Route path="/articles/:slug" element={<ArticleDetailPage />} />
+- type: callout
+  variant: warning
+  content: |
+    **dangerouslySetInnerHTML — tên gọi cảnh báo có lý do.** Nhúng HTML thô vào React bỏ qua mọi lớp bảo vệ XSS mặc định của React. Ở đây nó *an toàn* **chỉ vì** backend đã sanitize bằng DOMPurify trước khi trả `content_html`. Quy tắc vàng: nếu HTML đến từ người dùng và **chưa** được sanitize ở đâu đó, tuyệt đối không dùng prop này. Việc sanitize ở backend (be-03) chính là thứ làm cho dòng code này hợp lệ.
+- type: command
+  label: Chạy + lưu mốc bước 4.3
+  content: |
+    npm run dev    # bấm vào 1 bài -> đọc toàn văn (heading, code block render đẹp)
+    git add . && git commit -m "[step-4.3] ArticleDetailPage — chi tiết bài (render content_html)"
+- type: resource
+  label: Commit đối chiếu (step-4.3)
+  url: https://github.com/KouTaru99/mini-wiki/commit/98f453a
+  kind: docs

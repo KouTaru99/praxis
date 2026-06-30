@@ -2,9 +2,109 @@ id: fe-02
 title: Trang danh sách bài viết
 order: 2
 est_minutes: 35
-goal: Gọi API và hiển thị danh sách bài.
-deliverable: Trang chủ web hiện danh sách bài từ backend.
-outcome_preview: Bạn sẽ thấy các bài viết vừa tạo hiện lên giao diện.
+commit_ref: fc087bf
+goal: Gọi API và hiển thị danh sách bài viết, xử lý đủ trạng thái loading / lỗi / rỗng.
+deliverable: ArticleListPage + ArticleCard; trang chủ hiện danh sách bài từ backend.
+outcome_preview: Bạn sẽ thấy các bài viết (đã seed) hiện lên giao diện, mỗi bài có tiêu đề, ngày đăng và tag.
 blocks:
 - type: prose
-  content: Dùng fetch gọi GET /api/articles rồi render ra danh sách.
+  content: |
+    Bước này nối front-end với back-end thật. Điểm đáng học: **xử lý đủ mọi trạng thái** của một lời gọi mạng — đang tải, lỗi, rỗng, và có dữ liệu. Ta dùng kiểu *discriminated union* cho `state` để TypeScript ép ta xử lý từng nhánh.
+- type: code
+  filename: web/src/pages/ArticleListPage.tsx
+  lang: typescript
+  content: |
+    import { useEffect, useState } from 'react';
+    import type { ArticleListItem, Paginated } from '../types';
+    import { listArticles } from '../lib/api';
+    import ArticleCard from '../components/ArticleCard';
+
+    export default function ArticleListPage() {
+      const [state, setState] = useState<
+        | { status: 'loading' }
+        | { status: 'error'; message: string }
+        | { status: 'ok'; result: Paginated<ArticleListItem> }
+      >({ status: 'loading' });
+
+      useEffect(() => {
+        let cancelled = false; // tránh setState sau khi component đã unmount
+        listArticles()
+          .then((result) => { if (!cancelled) setState({ status: 'ok', result }); })
+          .catch((err: unknown) => {
+            if (!cancelled) {
+              const message = err instanceof Error ? err.message : 'Lỗi không xác định';
+              setState({ status: 'error', message });
+            }
+          });
+        return () => { cancelled = true; };
+      }, []);
+
+      if (state.status === 'loading') return <p className="state-msg">Đang tải…</p>;
+      if (state.status === 'error')
+        return <p className="state-msg error">Lỗi khi tải: {state.message}</p>;
+
+      const { data: articles } = state.result;
+      return (
+        <div>
+          <h1 className="page-title">Bài viết</h1>
+          {articles.length === 0 ? (
+            <p className="state-msg">Chưa có bài viết nào.</p>
+          ) : (
+            articles.map((a) => <ArticleCard key={a.id} article={a} />)
+          )}
+        </div>
+      );
+    }
+- type: prose
+  content: |
+    Tách `ArticleCard` thành component riêng — format ngày sang tiếng Việt và hiển thị tag:
+- type: code
+  filename: web/src/components/ArticleCard.tsx
+  lang: typescript
+  content: |
+    import { Link } from 'react-router-dom';
+    import type { ArticleListItem } from '../types';
+
+    function formatDate(iso: string): string {
+      return new Date(iso).toLocaleDateString('vi-VN', {
+        day: 'numeric', month: 'long', year: 'numeric',
+      });
+    }
+
+    export default function ArticleCard({ article }: { article: ArticleListItem }) {
+      return (
+        <div className="article-card">
+          <div className="card-title">
+            <Link to={`/articles/${article.slug}`}>{article.title}</Link>
+          </div>
+          {article.published_at && (
+            <div className="card-meta">Đăng ngày {formatDate(article.published_at)}</div>
+          )}
+          {article.tags.length > 0 && (
+            <div className="tag-list">
+              {article.tags.map((t) => <span key={t.id} className="tag-chip">{t.name}</span>)}
+            </div>
+          )}
+        </div>
+      );
+    }
+- type: code
+  filename: web/src/App.tsx (gắn route /)
+  lang: typescript
+  content: |
+    import ArticleListPage from './pages/ArticleListPage';
+    // trong <Route element={<Layout />}>:
+    <Route path="/" element={<ArticleListPage />} />
+- type: callout
+  variant: info
+  content: |
+    **Cờ cancelled để làm gì?** Nếu người dùng rời trang *trước khi* fetch xong, gọi `setState` trên component đã unmount sẽ gây cảnh báo (và rò bộ nhớ). Hàm cleanup `return () => { cancelled = true }` của `useEffect` đánh dấu "đừng cập nhật nữa". Đây là pattern chuẩn khi fetch dữ liệu trong `useEffect`.
+- type: command
+  label: Chạy + lưu mốc bước 4.2
+  content: |
+    npm run dev    # http://localhost:5173 -> thấy danh sách bài đã seed
+    git add . && git commit -m "[step-4.2] ArticleListPage — danh sách bài viết"
+- type: resource
+  label: Commit đối chiếu (step-4.2)
+  url: https://github.com/KouTaru99/mini-wiki/commit/fc087bf
+  kind: docs

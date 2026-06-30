@@ -1,0 +1,117 @@
+id: fe-05
+title: Lọc theo tag & ô tìm kiếm
+order: 5
+est_minutes: 35
+commit_ref: dc9b724
+goal: Thêm dải chip lọc theo tag và ô tìm kiếm full-text (debounce), nối vào API search.
+deliverable: ArticleListPage nâng cấp với search-bar + tag chip; lọc và tìm kiếm hoạt động.
+outcome_preview: Bạn sẽ gõ từ khóa thấy kết quả lọc dần (sau 300ms), và bấm chip tag để xem bài theo chủ đề.
+blocks:
+- type: prose
+  content: |
+    Bước cuối Chặng 4 hoàn thiện trang danh sách: thêm **ô tìm kiếm** (gọi API FTS ở be-05) và **dải chip lọc theo tag**. Hai chế độ này *loại trừ nhau* — gõ tìm kiếm thì bỏ lọc tag, và ngược lại.
+
+    Kỹ thuật đáng học nhất: **debounce**. Nếu gọi API mỗi lần gõ một phím, ta bắn hàng loạt request thừa. Thay vào đó, ta chờ 300ms sau phím cuối mới gọi — gõ nhanh chỉ tốn một request.
+- type: code
+  filename: web/src/pages/ArticleListPage.tsx
+  lang: typescript
+  content: |
+    import { useEffect, useState } from 'react';
+    import type { ArticleListItem, Paginated, Tag } from '../types';
+    import { listArticles, searchArticles, listTags } from '../lib/api';
+    import ArticleCard from '../components/ArticleCard';
+
+    type DataState =
+      | { status: 'loading' }
+      | { status: 'error'; message: string }
+      | { status: 'ok'; result: Paginated<ArticleListItem> };
+
+    export default function ArticleListPage() {
+      const [query, setQuery] = useState('');
+      const [activeTag, setActiveTag] = useState<string | null>(null);
+      const [tags, setTags] = useState<Tag[]>([]);
+      const [data, setData] = useState<DataState>({ status: 'loading' });
+
+      useEffect(() => { listTags().then(setTags).catch(() => {}); }, []);
+
+      // Fetch — debounce 300ms khi đang tìm kiếm
+      useEffect(() => {
+        let cancelled = false;
+        const q = query.trim();
+        const doFetch = () => {
+          const promise = q ? searchArticles(q) : listArticles(activeTag ? { tag: activeTag } : undefined);
+          promise
+            .then((result) => { if (!cancelled) setData({ status: 'ok', result }); })
+            .catch((err: unknown) => {
+              if (!cancelled)
+                setData({ status: 'error', message: err instanceof Error ? err.message : 'Lỗi' });
+            });
+        };
+        setData({ status: 'loading' });
+        if (q) {
+          const timer = setTimeout(doFetch, 300); // debounce
+          return () => { cancelled = true; clearTimeout(timer); };
+        }
+        doFetch();
+        return () => { cancelled = true; };
+      }, [query, activeTag]);
+
+      // Tag và search loại trừ nhau
+      const handleTagClick = (slug: string) => {
+        setActiveTag((prev) => (prev === slug ? null : slug));
+        setQuery('');
+      };
+      const handleQueryChange = (q: string) => {
+        setQuery(q);
+        if (q.trim()) setActiveTag(null);
+      };
+
+      return (
+        <div>
+          <h1 className="page-title">Bài viết</h1>
+          <div className="search-bar">
+            <input className="search-input" type="search" value={query}
+              onChange={(e) => handleQueryChange(e.target.value)} placeholder="Tìm kiếm bài viết…" />
+          </div>
+          {tags.length > 0 && (
+            <div className="tag-filter">
+              {tags.map((tag) => (
+                <button key={tag.id} type="button"
+                  className={`tag-chip tag-chip--btn${activeTag === tag.slug ? ' tag-chip--active' : ''}`}
+                  onClick={() => handleTagClick(tag.slug)}>
+                  {tag.name}
+                </button>
+              ))}
+            </div>
+          )}
+          {data.status === 'loading' && <p className="state-msg">Đang tải…</p>}
+          {data.status === 'error' && <p className="state-msg error">Lỗi: {data.message}</p>}
+          {data.status === 'ok' &&
+            (data.result.data.length === 0 ? (
+              <p className="state-msg">
+                {query.trim() ? `Không tìm thấy kết quả cho "${query.trim()}".`
+                  : activeTag ? 'Không có bài viết nào với thẻ này.' : 'Chưa có bài viết nào.'}
+              </p>
+            ) : (
+              data.result.data.map((a) => <ArticleCard key={a.id} article={a} />)
+            ))}
+        </div>
+      );
+    }
+- type: callout
+  variant: info
+  content: |
+    **Debounce — chờ một nhịp rồi mới hành động.** `setTimeout(doFetch, 300)` lên lịch gọi API sau 300ms; nhưng mỗi lần gõ phím mới, `useEffect` chạy lại và hàm cleanup `clearTimeout` *hủy* lịch cũ. Kết quả: chỉ khi bạn ngừng gõ 300ms, request mới thật sự bắn đi. Đây là kỹ thuật tối ưu phổ biến cho ô tìm kiếm, autocomplete, resize…
+- type: callout
+  variant: tip
+  content: |
+    **Vì sao tag-filter và search loại trừ nhau?** Backend có 2 endpoint riêng (`/articles?tag=` và `/search?q=`), không có endpoint "vừa tìm vừa lọc tag". Thay vì gượng ép kết hợp, ta chọn cách rõ ràng: bật cái này thì tắt cái kia. Một quyết định UX nhỏ nhưng giữ code và trải nghiệm đều mạch lạc.
+- type: command
+  label: Chạy + lưu mốc bước 4.5 — kết thúc Chặng 4
+  content: |
+    npm run dev    # gõ tìm kiếm + bấm chip tag để thử
+    git add . && git commit -m "[step-4.5] Lọc theo tag + ô tìm kiếm ở trang danh sách"
+- type: resource
+  label: Commit đối chiếu (step-4.5)
+  url: https://github.com/KouTaru99/mini-wiki/commit/dc9b724
+  kind: docs

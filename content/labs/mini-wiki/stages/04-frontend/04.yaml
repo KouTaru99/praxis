@@ -1,0 +1,185 @@
+id: fe-04
+title: Form tạo & sửa bài viết
+order: 4
+est_minutes: 45
+commit_ref: 27a03bd
+goal: Viết một form dùng chung cho cả tạo mới lẫn chỉnh sửa, kèm nút xóa.
+deliverable: ArticleEditorPage tại /new và /articles/:slug/edit; thêm hàm POST/PUT/DELETE vào api client.
+outcome_preview: Bạn sẽ tạo được bài mới qua form, sửa bài cũ (form điền sẵn), và xóa bài — tất cả phản ánh ngay lên danh sách.
+blocks:
+- type: prose
+  content: |
+    Trước giờ front-end chỉ *đọc*. Bước này thêm khả năng *ghi*: tạo, sửa, xóa. Thiết kế hay ở đây là **một component ArticleEditorPage phục vụ cả hai việc** — phân biệt "tạo" hay "sửa" qua việc URL có `:slug` hay không.
+
+    Trước hết, thêm hàm gửi (`apiSend`) xử lý POST/PUT/DELETE — chú ý nó phải xử lý riêng mã `204 No Content` (DELETE không trả body):
+- type: code
+  filename: web/src/lib/api.ts (thêm)
+  lang: typescript
+  content: |
+    export interface ArticleInput {
+      title: string;
+      content: string;
+      published_at: string | null;
+      tagIds: number[];
+    }
+
+    async function apiSend<T>(method: string, path: string, body?: unknown): Promise<T> {
+      const res = await fetch(`${BASE_URL}${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      if (res.status === 204) return undefined as T; // DELETE: không có body
+      if (!res.ok) {
+        const b = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+        throw new Error(b?.error?.message ?? `HTTP ${res.status}`);
+      }
+      return res.json() as Promise<T>;
+    }
+
+    export const createArticle = (input: ArticleInput) =>
+      apiSend<Article>('POST', '/articles', input);
+    export const updateArticle = (slug: string, input: Partial<ArticleInput>) =>
+      apiSend<Article>('PUT', `/articles/${encodeURIComponent(slug)}`, input);
+    export const deleteArticle = (slug: string) =>
+      apiSend<void>('DELETE', `/articles/${encodeURIComponent(slug)}`);
+- type: prose
+  content: |
+    Component editor: nếu có `slug` (chế độ sửa) thì tải bài về điền form; nếu không thì form trống (tạo mới). Khi submit, gọi `updateArticle` hoặc `createArticle` tương ứng:
+- type: code
+  filename: web/src/pages/ArticleEditorPage.tsx
+  lang: typescript
+  content: |
+    import { useEffect, useState } from 'react';
+    import { useParams, useNavigate, Link } from 'react-router-dom';
+    import type { Tag } from '../types';
+    import type { ArticleInput } from '../lib/api';
+    import { getArticle, listTags, createArticle, updateArticle, deleteArticle } from '../lib/api';
+
+    type FormState = { title: string; content: string; publishNow: boolean; tagIds: number[] };
+
+    export default function ArticleEditorPage() {
+      const { slug } = useParams<{ slug: string }>();
+      const navigate = useNavigate();
+      const isEdit = slug !== undefined;
+
+      const [tags, setTags] = useState<Tag[]>([]);
+      const [form, setForm] = useState<FormState>({ title: '', content: '', publishNow: false, tagIds: [] });
+      const [submitting, setSubmitting] = useState(false);
+      const [error, setError] = useState<string | null>(null);
+
+      useEffect(() => { listTags().then(setTags).catch(() => {}); }, []);
+
+      // Chế độ sửa: tải bài về điền form
+      useEffect(() => {
+        if (!slug) return;
+        let cancelled = false;
+        getArticle(slug).then((a) => {
+          if (cancelled) return;
+          setForm({
+            title: a.title, content: a.content,
+            publishNow: a.published_at !== null, tagIds: a.tags.map((t) => t.id),
+          });
+        }).catch(() => {});
+        return () => { cancelled = true; };
+      }, [slug]);
+
+      const toggleTag = (id: number) =>
+        setForm((f) => ({
+          ...f,
+          tagIds: f.tagIds.includes(id) ? f.tagIds.filter((t) => t !== id) : [...f.tagIds, id],
+        }));
+
+      const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setSubmitting(true); setError(null);
+        const input: ArticleInput = {
+          title: form.title, content: form.content,
+          published_at: form.publishNow ? new Date().toISOString() : null,
+          tagIds: form.tagIds,
+        };
+        try {
+          const article = isEdit && slug
+            ? await updateArticle(slug, input)
+            : await createArticle(input);
+          navigate(`/articles/${article.slug}`);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Lỗi không xác định');
+          setSubmitting(false);
+        }
+      };
+
+      const handleDelete = async () => {
+        if (!slug || !window.confirm('Xác nhận xóa bài viết này?')) return;
+        setSubmitting(true);
+        try { await deleteArticle(slug); navigate('/'); }
+        catch (err) { setError(err instanceof Error ? err.message : 'Lỗi'); setSubmitting(false); }
+      };
+
+      return (
+        <div className="editor-page">
+          <h1 className="page-title">{isEdit ? 'Sửa bài viết' : 'Viết bài mới'}</h1>
+          <form className="editor-form" onSubmit={handleSubmit}>
+            <div className="form-field">
+              <label htmlFor="title">Tiêu đề *</label>
+              <input id="title" value={form.title} required maxLength={255}
+                onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} disabled={submitting} />
+            </div>
+            <div className="form-field">
+              <label htmlFor="content">Nội dung (Markdown) *</label>
+              <textarea id="content" value={form.content} required rows={16}
+                onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))} disabled={submitting} />
+            </div>
+            <label className="check-label">
+              <input type="checkbox" checked={form.publishNow}
+                onChange={(e) => setForm((f) => ({ ...f, publishNow: e.target.checked }))} disabled={submitting} />
+              Xuất bản ngay (bỏ chọn = lưu nháp)
+            </label>
+            {tags.length > 0 && (
+              <div className="tag-checkbox-list">
+                {tags.map((tag) => (
+                  <label key={tag.id} className="tag-checkbox-item">
+                    <input type="checkbox" checked={form.tagIds.includes(tag.id)}
+                      onChange={() => toggleTag(tag.id)} disabled={submitting} />
+                    {tag.name}
+                  </label>
+                ))}
+              </div>
+            )}
+            {error && <p className="form-error">{error}</p>}
+            <div className="form-actions">
+              <button type="submit" className="btn btn-primary" disabled={submitting}>
+                {submitting ? 'Đang lưu…' : isEdit ? 'Lưu thay đổi' : 'Tạo bài viết'}
+              </button>
+              {isEdit && (
+                <button type="button" className="btn btn-danger" onClick={handleDelete} disabled={submitting}>
+                  Xóa bài viết
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      );
+    }
+- type: code
+  filename: web/src/App.tsx + Layout.tsx
+  lang: typescript
+  content: |
+    // App.tsx — thêm 2 route (cùng 1 component cho /new và /edit)
+    <Route path="/new" element={<ArticleEditorPage />} />
+    <Route path="/articles/:slug/edit" element={<ArticleEditorPage />} />
+
+    // Layout.tsx — thêm link vào nav
+    <Link to="/new">Viết bài</Link>
+- type: callout
+  variant: info
+  content: |
+    **Một component, hai nhiệm vụ.** `/new` và `/articles/:slug/edit` trỏ tới cùng `ArticleEditorPage`. Biến `isEdit = slug !== undefined` quyết định: tải dữ liệu cũ hay không, gọi `updateArticle` hay `createArticle`, hiện nút Xóa hay không. Tránh viết hai form gần-giống-nhau là một cách giữ code DRY (Don't Repeat Yourself).
+- type: command
+  label: Lưu mốc bước 4.4
+  content: |
+    git add . && git commit -m "[step-4.4] Form tạo/sửa bài viết (POST/PUT/DELETE) + route /new, /:slug/edit"
+- type: resource
+  label: Commit đối chiếu (step-4.4)
+  url: https://github.com/KouTaru99/mini-wiki/commit/27a03bd
+  kind: docs
