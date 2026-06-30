@@ -1,0 +1,64 @@
+id: dep-03
+title: README & Production Checklist (trung thực)
+order: 3
+est_minutes: 30
+commit_ref: b62a2d5
+goal: Hoàn thiện README hướng dẫn chạy + một production checklist trung thực (ghi rõ cả cái CHƯA làm).
+deliverable: README.md đầy đủ + docs/production-checklist.md (6 đã làm / 2 cần thêm / 4 chưa có).
+outcome_preview: Bạn sẽ có một dự án hoàn chỉnh, tài liệu rõ ràng, và một checklist thành thật về mức độ sẵn-sàng-production.
+blocks:
+- type: prose
+  content: |
+    Bước cuối cùng của cả Lab: **tài liệu hóa**. Một README tốt giúp người lạ (kể cả bạn 6 tháng sau) chạy được dự án trong vài phút. Nhưng phần đáng giá nhất là **production checklist trung thực** — ghi rõ cái gì đã làm, cái gì *chưa*, và *vì sao chưa*.
+- type: prose
+  content: |
+    `docs/production-checklist.md` rà 12 hạng mục, mỗi cái có trạng thái thật:
+- type: code
+  filename: docs/production-checklist.md (trích)
+  lang: markdown
+  content: |
+    # Production Checklist — Mini-Wiki
+    > Mục chưa làm được ghi rõ trạng thái + lý do — không che giấu.
+
+    ## Bảo mật & Cấu hình
+    | # | Hạng mục | Trạng thái | Ghi chú |
+    |---|---|---|---|
+    | 1 | Biến môi trường (.env trong .gitignore) | ✅ Đã làm | DATABASE_URL/CORS_ORIGIN/PORT đọc từ env |
+    | 2 | HTTPS / Reverse-proxy | ⚠️ Chưa làm | Scope v1 chạy local. Lên mạng: thêm Nginx+Certbot hoặc Cloudflare Tunnel |
+    | 3 | CORS đúng origin (không để *) | ✅ Đã làm | Đặt trong docker-compose, thay domain thật khi deploy |
+    | 4 | Rate limiting | ❌ Chưa có | Lab nâng cao: express-rate-limit ở middleware |
+    | 5 | Authentication/Authorization | ❌ Chưa có | v1 là public (đọc/ghi tự do); auth = lab riêng |
+
+    ## Cơ sở dữ liệu
+    | 6 | Migration tự động khi khởi động | ✅ Đã làm | Dockerfile chạy prisma migrate deploy |
+    | 7 | Healthcheck DB trước khi api start | ✅ Đã làm | compose: condition service_healthy |
+    | 8 | Backup định kỳ (pg_dump) | ❌ Chưa có | Production: pg_dump theo cron, hoặc managed DB có backup sẵn |
+
+    ## Vận hành & Quan sát
+    | 9 | Healthcheck API (/health -> 200) | ✅ Đã làm | GET /health trả status ok |
+    | 10 | Logging ra stdout | ✅ Đã làm | Morgan ghi HTTP log ra stdout |
+    | 11 | Restart policy (tự khởi động lại khi crash) | ⚠️ Chưa đặt | Thêm restart: unless-stopped khi deploy |
+    | 12 | Resource limits (CPU/RAM) | ❌ Chưa có | Production: deploy.resources.limits hoặc Kubernetes |
+
+    ## Tổng kết
+    ✅ Đã làm (6): env · CORS · DB healthcheck · migration · API healthcheck · logging
+    ⚠️ Cần thêm khi lên mạng (2): HTTPS/reverse-proxy · restart policy
+    ❌ Chưa có (4): rate-limit · auth · backup · resource-limit  (đều là lab nâng cao)
+- type: callout
+  variant: tip
+  content: |
+    **Trung thực về cái CHƯA làm quan trọng ngang cái đã làm.** Một checklist toàn dấu ✅ thường là dấu hiệu của sự thiếu trung thực hoặc thiếu hiểu biết — không hệ thống nào hoàn hảo. Ghi rõ "chưa có rate-limit, vì v1 bỏ qua, thêm sau bằng express-rate-limit" cho người đọc biết *chính xác* rủi ro và đường đi tiếp. Đây là phẩm chất kỹ sư đáng quý: biết hệ thống của mình *chưa* làm được gì.
+- type: callout
+  variant: info
+  content: |
+    **Pilot này dừng ở mức docker-compose chạy local ($0).** Mục tiêu là học trọn vòng đời PTPM với chi phí bằng không — `bash scripts/run-stack.sh` cho bạn một hệ thống production-like ngay trên máy. Đưa lên cloud thật (VPS + reverse-proxy + domain) là một **lab nâng cao** riêng (`docs/deploy-cloud.md` là phụ lục tham khảo): nó cần đăng ký dịch vụ, nhập thẻ — việc bạn tự làm khi sẵn sàng, không bắt buộc để hoàn thành Lab này.
+- type: command
+  label: Lưu mốc bước 6.3 — HOÀN TẤT toàn bộ Lab
+  content: |
+    git add README.md docs/production-checklist.md docs/deploy-cloud.md
+    git commit -m "[step-6.3] README + production checklist + phụ lục deploy cloud"
+    # 22/22 commit [step-X.Y] — Lab Mini-Wiki hoàn tất!
+- type: resource
+  label: Commit đối chiếu — README + checklist đầy đủ (step-6.3)
+  url: https://github.com/KouTaru99/mini-wiki/commit/b62a2d5
+  kind: docs

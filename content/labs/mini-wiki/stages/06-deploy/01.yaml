@@ -1,12 +1,146 @@
 id: dep-01
-title: Đóng gói Docker
+title: Đóng gói Docker (api + web + db)
 order: 1
-est_minutes: 30
-goal: Viết Dockerfile + docker-compose cho toàn bộ app.
-deliverable: docker compose up chạy cả api + web + db.
-outcome_preview: Bạn sẽ thấy cả 3 service lên cùng lúc bằng một lệnh.
+est_minutes: 40
+commit_ref: 1252e9b
+goal: Viết Dockerfile multi-stage cho api và web, gom cả 3 service vào một docker-compose chạy được.
+deliverable: api/Dockerfile + web/Dockerfile + nginx.conf + docker-compose.yml đầy đủ.
+outcome_preview: Bạn sẽ chạy docker compose up và thấy cả 3 service (db, api, web) lên cùng lúc, app chạy production-like.
 blocks:
 - type: prose
-  content: docker-compose gom api, web, db vào một lệnh khởi động duy nhất.
+  content: |
+    Chặng cuối: **đóng gói** để app chạy được ở bất kỳ máy nào có Docker — không cần cài Node, Postgres thủ công. Ta dùng **multi-stage build**: stage đầu build (cần devDeps), stage sau chỉ giữ thứ cần để chạy → image nhỏ, gọn.
+
+    Dockerfile cho **api** — chú ý 2 bẫy đã được giải sẵn trong comment (OpenSSL cho Prisma, và migrate-on-start):
+- type: code
+  filename: api/Dockerfile
+  lang: dockerfile
+  content: |
+    # ── Stage 1: BUILD (cần devDeps để chạy tsc + prisma generate) ──
+    FROM node:22-slim AS build
+    WORKDIR /app
+
+    # Prisma cần OpenSSL để chọn query engine. node:22-slim (debian) KHÔNG có sẵn
+    # -> phải cài, nếu không sẽ lỗi "failed to detect libssl".
+    RUN apt-get update -y && apt-get install -y --no-install-recommends openssl \
+      && rm -rf /var/lib/apt/lists/*
+
+    COPY package*.json ./
+    COPY prisma/ ./prisma/
+    RUN npm ci
+    COPY tsconfig.json ./
+    COPY src/ ./src/
+    RUN npx prisma generate
+    RUN npm run build          # tsc -> dist/
+
+    # ── Stage 2: RUNTIME (chỉ production deps, không source TS) ──
+    FROM node:22-slim
+    WORKDIR /app
+    RUN apt-get update -y && apt-get install -y --no-install-recommends openssl \
+      && rm -rf /var/lib/apt/lists/*
+    COPY package*.json ./
+    COPY prisma/ ./prisma/
+    RUN npm ci --omit=dev
+    COPY --from=build /app/dist ./dist
+    COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+    COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
+    ENV NODE_ENV=production
+    EXPOSE 3000
+    # Áp migration RỒI mới start server (an toàn cho production)
+    CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+- type: prose
+  content: |
+    Dockerfile cho **web** khác hẳn: Vite "bake" biến môi trường *lúc build* vào bundle, sau đó chỉ cần `nginx` phục vụ file tĩnh — image cuối không cần Node:
+- type: code
+  filename: web/Dockerfile
+  lang: dockerfile
+  content: |
+    # ── Stage 1: BUILD (Vite bake VITE_API_URL vào bundle lúc build) ──
+    FROM node:22-slim AS build
+    WORKDIR /app
+    COPY package*.json ./
+    RUN npm ci
+    COPY . .
+    ARG VITE_API_URL=http://localhost:3000/api
+    ENV VITE_API_URL=$VITE_API_URL
+    RUN npm run build          # -> dist/ (file tĩnh)
+
+    # ── Stage 2: SERVE (chỉ nginx + file tĩnh, không Node) ──
+    FROM nginx:alpine
+    COPY nginx.conf /etc/nginx/conf.d/default.conf
+    COPY --from=build /app/dist /usr/share/nginx/html
+    EXPOSE 80
+- type: code
+  filename: web/nginx.conf
+  lang: nginx
+  content: |
+    server {
+        listen 80;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # SPA fallback: route không khớp file tĩnh -> trả index.html
+        # (cần cho react-router: vào thẳng /articles/my-slug không được 404)
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
+- type: prose
+  content: |
+    Cuối cùng, mở rộng `docker-compose.yml` để gom cả 3 service. Chú ý: trong mạng Docker, các container gọi nhau qua **tên service** (`db`), không phải `localhost`:
+- type: code
+  filename: docker-compose.yml (thêm api + web)
+  lang: yaml
+  content: |
+    services:
+      db:
+        image: postgres:16-alpine
+        environment: { POSTGRES_DB: miniwiki, POSTGRES_USER: dev, POSTGRES_PASSWORD: dev }
+        ports: ['5432:5432']
+        volumes: [pgdata:/var/lib/postgresql/data]
+        healthcheck:
+          test: ['CMD-SHELL', 'pg_isready -U dev -d miniwiki']
+          interval: 5s
+          timeout: 5s
+          retries: 5
+
+      api:
+        build: ./api
+        depends_on:
+          db: { condition: service_healthy }   # chờ DB sẵn sàng mới start
+        environment:
+          # HOST = "db" (tên service), KHÔNG phải localhost
+          DATABASE_URL: postgresql://dev:dev@db:5432/miniwiki?schema=public
+          CORS_ORIGIN: http://localhost:8080
+          PORT: 3000
+        ports: ['3000:3000']
+
+      web:
+        build:
+          context: ./web
+          args:
+            # Browser gọi api qua localhost:3000 (cổng expose ra host), không qua mạng Docker
+            VITE_API_URL: http://localhost:3000/api
+        depends_on: [api]
+        ports: ['8080:80']
+
+    volumes:
+      pgdata:
+- type: callout
+  variant: warning
+  content: |
+    **Hai bẫy Docker kinh điển ở đây.** (1) `node:22-slim` (Debian) **thiếu OpenSSL** mà Prisma cần — không cài thì lỗi "failed to detect libssl" ở cả 2 stage. (2) `prisma` là **runtime dependency** khi ta migrate-on-start, nên không được nằm trong devDeps — `npm ci --omit=dev` sẽ thiếu CLI. Cả hai chỉ lộ ra khi *build image thật*, không phải khi chạy dev — lý do nữa để luôn kiểm bằng Docker.
+- type: callout
+  variant: info
+  content: |
+    **Vì sao VITE_API_URL phải truyền lúc build, không phải runtime?** Front-end là **file tĩnh** chạy trên *trình duyệt người dùng*, không phải trong container. Vite ghi thẳng giá trị `VITE_API_URL` vào file JS lúc build. Vì thế trình duyệt gọi API qua `localhost:3000` (cổng expose ra máy host), chứ không qua tên service `api` của mạng Docker — vì trình duyệt nằm *ngoài* mạng đó.
 - type: command
-  content: docker compose up -d
+  label: Build + chạy + lưu mốc bước 6.1
+  content: |
+    docker compose up -d --build      # build 2 image + lên 3 service
+    docker compose ps                 # db + api healthy, web up
+    git add . && git commit -m "[step-6.1] Đóng gói Docker: Dockerfile api+web + compose full"
+- type: resource
+  label: Commit đối chiếu (step-6.1)
+  url: https://github.com/KouTaru99/mini-wiki/commit/1252e9b
+  kind: docs

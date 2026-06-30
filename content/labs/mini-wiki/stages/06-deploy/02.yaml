@@ -1,0 +1,68 @@
+id: dep-02
+title: Runner 1 lệnh dựng & nghiệm toàn stack
+order: 2
+est_minutes: 25
+commit_ref: 93abcd4
+goal: Viết một script dựng toàn bộ stack, chờ healthy và chạy smoke-test — tất cả bằng một lệnh.
+deliverable: scripts/run-stack.sh; chạy ra cả stack lên + 12/12 smoke pass qua container.
+outcome_preview: Bạn sẽ gõ một lệnh duy nhất và xem cả hệ thống tự build, khởi động, tự kiểm tra rồi báo "sẵn sàng".
+blocks:
+- type: prose
+  content: |
+    Có Docker rồi, nhưng "build, chờ DB, chờ API healthy, chạy smoke-test" là 4-5 lệnh thủ công dễ quên thứ tự. Ta gói tất cả vào **một script** `run-stack.sh` — để người học (và cả bạn sau này) chỉ cần một lệnh là thấy app chạy production-like.
+
+    Script dùng `set -euo pipefail` để dừng ngay khi có lỗi, kiểm tra Docker đã cài chưa, rồi tuần tự dựng và nghiệm:
+- type: code
+  filename: scripts/run-stack.sh (khung chính)
+  lang: bash
+  content: |
+    #!/usr/bin/env bash
+    # Dựng + nghiệm toàn stack mini-wiki bằng 1 lệnh. Chạy: bash scripts/run-stack.sh [--down]
+    set -euo pipefail
+
+    # [1/4] Kiểm tra tiên quyết
+    if ! command -v docker &> /dev/null; then
+      echo "✗ Chưa cài Docker — xem https://docs.docker.com/get-docker/"
+      exit 1
+    fi
+
+    # [2/4] Build + khởi động cả 3 service
+    echo "[2/4] docker compose up --build..."
+    docker compose up -d --build
+
+    # [3/4] Chờ API healthy (poll /health, tối đa ~60s)
+    echo "[3/4] Chờ API sẵn sàng..."
+    for i in $(seq 1 30); do
+      if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+        echo "  API đã sẵn sàng."
+        break
+      fi
+      sleep 2
+    done
+
+    # [4/4] Chạy smoke-test qua container đang chạy
+    echo "[4/4] Smoke-test..."
+    bash scripts/smoke-test.sh
+
+    echo ""
+    echo "Hoàn tất! Mở http://localhost:8080 để xem app."
+    echo "Dừng + dọn: docker compose down"
+
+    # Cờ --down: tự dọn sau khi kiểm tra (mặc định GIỮ chạy để vào trình duyệt xem)
+    for arg in "$@"; do
+      [[ "$arg" == "--down" ]] && docker compose down
+    done
+- type: callout
+  variant: tip
+  content: |
+    **"Một lệnh để chạy mọi thứ" là một dấu hiệu của dự án trưởng thành.** Khi onboard người mới, thay vì một trang README dài "cài cái này, chạy cái kia, nhớ thứ tự...", bạn chỉ nói "chạy `bash scripts/run-stack.sh`". Script tự lo điều kiện, thứ tự, và tự kiểm chứng. Đây cũng là nền tảng để sau này ghép vào CI/CD — máy chủ tích hợp chạy đúng script đó.
+- type: command
+  label: Chạy runner + lưu mốc bước 6.2
+  content: |
+    bash scripts/run-stack.sh         # build + lên + chờ healthy + smoke 12/12
+    git add scripts/run-stack.sh
+    git commit -m "[step-6.2] Runner 1 lệnh dựng + nghiệm toàn stack qua container"
+- type: resource
+  label: Commit đối chiếu — script đầy đủ (step-6.2)
+  url: https://github.com/KouTaru99/mini-wiki/commit/93abcd4
+  kind: docs
