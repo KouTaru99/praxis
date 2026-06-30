@@ -1,11 +1,151 @@
 id: req-01
-title: Viết yêu cầu sản phẩm
+title: Khởi tạo dự án & viết Đặc tả Yêu cầu
 order: 1
-est_minutes: 20
-goal: Viết file requirements.md mô tả Mini-Wiki làm được gì.
-deliverable: docs/requirements.md liệt kê tính năng + user story.
-outcome_preview: Bạn sẽ có 1 file mô tả rõ phạm vi để không lạc hướng khi code.
+est_minutes: 30
+commit_ref: faf4caa
+goal: Khởi tạo repo và viết tài liệu yêu cầu (requirements) — nền móng của mọi dự án phần mềm.
+deliverable: Một repo git mới có README, .gitignore và docs/requirements.md (15 FR + 8 NFR + 9 user story).
+outcome_preview: Sau bước này, bạn có một repo sạch và một bản đặc tả rõ ràng "phần mềm này phải làm được gì" — kim chỉ nam cho mọi bước sau.
 blocks:
 - type: prose
-  content: 'Mini-Wiki là nơi lưu các bài viết ngắn, mỗi bài gắn vài tag để lọc và tìm. Trước khi code,
-    ta viết ra cho rõ: ai dùng, làm được gì, không làm gì.'
+  content: |
+    Chào mừng đến với Lab Mini-Wiki! Bạn sẽ xây một ứng dụng wiki nhỏ (tạo/sửa/xóa bài viết, gắn nhãn, tìm kiếm) **đi đúng quy trình phát triển phần mềm thật**: từ yêu cầu → thiết kế → code → test → đóng gói. Mỗi bước đối chiếu được với một commit trong repo mẫu.
+
+    Kỹ sư thật **không mở editor gõ code ngay**. Việc đầu tiên là trả lời: *"Phần mềm này phải làm được gì, và tốt tới mức nào?"* — đó là **Đặc tả Yêu cầu (Requirements)**. Viết rõ ngay từ đầu giúp tránh code sai hướng rồi đập đi.
+- type: command
+  label: Khởi tạo thư mục dự án
+  content: |
+    mkdir mini-wiki && cd mini-wiki
+    git init
+    mkdir docs
+- type: prose
+  content: |
+    Tạo file `.gitignore` để git bỏ qua các file không nên commit (thư viện, biến môi trường bí mật, output build). **Quan trọng:** file `.env` chứa mật khẩu database — tuyệt đối không đẩy lên git.
+- type: code
+  filename: .gitignore
+  lang: gitignore
+  content: |
+    # Dependencies
+    node_modules/
+
+    # Build output
+    dist/
+    build/
+    out/
+
+    # TypeScript
+    *.tsbuildinfo
+
+    # Environment variables — KHÔNG commit file .env thật
+    .env
+    .env.local
+    .env.*.local
+
+    # Logs
+    *.log
+    npm-debug.log*
+
+    # OS / Editor
+    .DS_Store
+    .idea/
+    .vscode/
+- type: prose
+  content: |
+    Giờ tới phần cốt lõi: viết `docs/requirements.md`. Tài liệu này có 3 phần:
+
+    - **FR (Functional Requirements):** hệ thống *làm được gì* — hành vi quan sát được (xem danh sách, tạo bài, tìm kiếm…).
+    - **NFR (Non-Functional Requirements):** hệ thống chạy *tốt như thế nào* — hiệu năng, bảo mật, khả năng triển khai.
+    - **User Stories:** kịch bản theo góc nhìn người dùng — "Là vai-trò, tôi muốn hành-động để giá-trị."
+
+    Copy toàn bộ nội dung dưới vào `docs/requirements.md`:
+- type: code
+  filename: docs/requirements.md
+  lang: markdown
+  content: |
+    # Đặc tả Yêu cầu — Mini-Wiki v1
+
+    > Phiên bản 1.0 (Chặng 1 — Ý tưởng & Yêu cầu)
+    > Phạm vi: v1 — ứng dụng wiki công khai, không xác thực người dùng
+
+    ## 1. Yêu cầu Chức năng (Functional Requirements)
+
+    ### 1.1 Quản lý Bài viết (Article)
+
+    | Mã | Yêu cầu |
+    |---|---|
+    | FR-1 | Xem danh sách bài viết đã đăng (tiêu đề, slug, ngày đăng), sắp xếp mới nhất trước. |
+    | FR-2 | Xem chi tiết bài viết qua URL /articles/:slug; Markdown render thành HTML an toàn. |
+    | FR-3 | Tạo bài viết mới: title, content (Markdown), published_at (tùy chọn). slug tự sinh từ title, hỗ trợ tiếng Việt. |
+    | FR-4 | Chỉnh sửa tiêu đề, nội dung, ngày đăng của bài viết. |
+    | FR-5 | Xóa bài viết; liên kết article_tags xóa theo (cascade). |
+    | FR-6 | Ngăn hai bài cùng slug; trả 409 Conflict khi trùng. |
+
+    ### 1.2 Quản lý Nhãn (Tag)
+
+    | Mã | Yêu cầu |
+    |---|---|
+    | FR-7 | Xem toàn bộ danh sách tag. |
+    | FR-8 | Tạo tag mới (name); slug tự sinh, phải duy nhất. |
+    | FR-9 | Xóa tag. Nếu tag còn gắn bài viết thì từ chối, trả 409 (ON DELETE RESTRICT). |
+    | FR-10 | Gắn / gỡ tag khỏi bài viết. |
+    | FR-11 | Lọc danh sách bài viết theo một tag. |
+
+    ### 1.3 Tìm kiếm (Search)
+
+    | Mã | Yêu cầu |
+    |---|---|
+    | FR-12 | Tìm bài theo từ khóa trong title lẫn content bằng Full-Text Search (FTS — tìm toàn văn). |
+    | FR-13 | Kết quả có phân trang (mặc định tối đa 20 kết quả/trang). |
+
+    ### 1.4 Render & An toàn Nội dung
+
+    | Mã | Yêu cầu |
+    |---|---|
+    | FR-14 | Markdown parse bằng marked + làm sạch bằng DOMPurify trước khi trả HTML, ngăn XSS. |
+    | FR-15 | slug tiếng Việt chuẩn hóa đúng ("Học lập trình" thành hoc-lap-trinh) bằng slugify locale vi. |
+
+    ## 2. Yêu cầu Phi Chức năng (Non-Functional Requirements)
+
+    | Mã | Yêu cầu |
+    |---|---|
+    | NFR-1 | Hiệu năng: CRUD đơn lẻ dưới 300ms local; FTS dưới 500ms nhờ GIN index. |
+    | NFR-2 | Bảo mật XSS: sanitize mọi Markdown; chặn script, event handler, iframe lạ. |
+    | NFR-3 | Bảo mật SQL Injection: mọi truy vấn qua Prisma ORM (parameterized query). |
+    | NFR-4 | CORS: API chỉ chấp nhận origin của front-end (qua CORS_ORIGIN). |
+    | NFR-5 | Không xác thực (v1): không đăng ký/đăng nhập; nội dung công khai. |
+    | NFR-6 | Khả năng triển khai: container hóa bằng Docker; dev = prod (parity). |
+    | NFR-7 | Bảo trì: TypeScript strict; Prisma migration version hóa; không lạm dụng any. |
+    | NFR-8 | Quan sát: mọi lỗi 5xx log ra stderr đủ context; không nuốt lỗi thầm. |
+
+    ## 3. User Stories
+
+    | Mã | Story |
+    |---|---|
+    | US-1 | Là độc giả, tôi muốn xem danh sách bài mới nhất để biết có gì đáng đọc. |
+    | US-2 | Là độc giả, tôi muốn đọc toàn văn bài qua link slug để tiện chia sẻ. |
+    | US-3 | Là tác giả, tôi muốn tạo bài mới với Markdown để đăng kiến thức. |
+    | US-4 | Là tác giả, tôi muốn sửa bài đã đăng để cập nhật thông tin. |
+    | US-5 | Là tác giả, tôi muốn xóa bài không phù hợp để giữ wiki gọn. |
+    | US-6 | Là tác giả, tôi muốn gắn tag vào bài để phân loại theo chủ đề. |
+    | US-7 | Là độc giả, tôi muốn lọc bài theo tag để đọc đúng chủ đề quan tâm. |
+    | US-8 | Là độc giả, tôi muốn tìm bài theo từ khóa để tìm nhanh nội dung. |
+    | US-9 | Là tác giả, tôi muốn tạo/xóa tag để quản lý phân loại của wiki. |
+
+    ## 4. Phạm vi v1
+
+    Trong phạm vi: CRUD Article + Tag, quan hệ nhiều-nhiều, render Markdown an toàn, FTS, slug tiếng Việt, REST API JSON, web SPA (React+Vite), Docker Compose.
+
+    Ngoài phạm vi (v1): xác thực/phân quyền, upload ảnh, bình luận, lịch sử chỉnh sửa, thông báo, SEO/SSR, i18n giao diện.
+- type: callout
+  variant: tip
+  content: |
+    **Vì sao v1 "không xác thực người dùng" (NFR-5)?** Đây là quyết định *cắt phạm vi* có chủ đích: auth là cả một thế giới riêng (mật khẩu, session, phân quyền). Để v1 tập trung học trọn vòng đời PTPM trên một bài toán nhỏ, ta tạm bỏ auth — và **ghi rõ là đã bỏ**, để người đọc sau không tưởng nhầm là thiếu sót.
+- type: command
+  label: Lưu mốc bước 1.1
+  content: |
+    git add .
+    git commit -m "[step-1.1] init project, requirements + user stories, .gitignore"
+- type: resource
+  label: Commit đối chiếu trên repo mẫu (step-1.1)
+  url: https://github.com/KouTaru99/mini-wiki/commit/faf4caa
+  kind: docs

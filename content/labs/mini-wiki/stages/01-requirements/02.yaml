@@ -1,12 +1,116 @@
 id: req-02
-title: Phác sơ đồ thực thể (ERD)
+title: Thiết kế sơ đồ thực thể (ERD)
 order: 2
-est_minutes: 20
-goal: Vẽ sơ đồ quan hệ giữa Bài viết và Tag.
-deliverable: docs/erd.md có sơ đồ Mermaid 3 bảng.
-outcome_preview: Bạn sẽ thấy rõ Bài viết và Tag nối nhau kiểu nhiều-nhiều.
+est_minutes: 25
+commit_ref: 851ce22
+goal: Thiết kế cấu trúc dữ liệu — có những bảng nào, cột gì, nối nhau ra sao.
+deliverable: docs/erd.md với sơ đồ Mermaid 3 bảng (articles, tags, article_tags) + giải thích ràng buộc.
+outcome_preview: Bạn sẽ thấy rõ Bài viết và Tag liên kết nhau kiểu nhiều-nhiều qua một bảng nối, trước khi đụng tới database thật.
 blocks:
 - type: prose
-  content: Một bài có nhiều tag, một tag thuộc nhiều bài — quan hệ nhiều-nhiều, cần bảng nối.
+  content: |
+    Có yêu cầu rồi, bước tiếp là **thiết kế dữ liệu**. Ta dùng **ERD (Entity-Relationship Diagram — sơ đồ thực thể-quan hệ)** để mô tả: có những bảng nào, mỗi bảng có cột gì, và các bảng nối nhau thế nào.
+
+    Mini-Wiki có 3 bảng: `articles` (bài viết), `tags` (nhãn), và `article_tags` (bảng nối). Vì sao cần bảng thứ 3? Một bài có nhiều tag, một tag gắn nhiều bài — quan hệ **nhiều-nhiều** không thể biểu diễn bằng 2 bảng, phải có bảng "cầu nối" lưu từng cặp (bài, tag).
+- type: prose
+  content: |
+    Đây là sơ đồ quan hệ — đọc `||--o{` là "một bên trái nối với không-hoặc-nhiều bên phải":
 - type: diagram
-  content: "erDiagram\n  ARTICLES ||--o{ ARTICLE_TAGS : has\n  TAGS ||--o{ ARTICLE_TAGS : has"
+  content: |
+    erDiagram
+        articles {
+            int id PK
+            varchar title
+            varchar slug UK
+            text content
+            timestamptz published_at
+            timestamptz created_at
+            timestamptz updated_at
+        }
+        tags {
+            int id PK
+            varchar name UK
+            varchar slug UK
+            timestamptz created_at
+        }
+        article_tags {
+            int article_id FK
+            int tag_id FK
+        }
+        articles ||--o{ article_tags : "có"
+        tags ||--o{ article_tags : "được gắn vào"
+- type: prose
+  content: |
+    Copy nội dung đầy đủ dưới vào `docs/erd.md` (gồm bảng mô tả từng cột + sơ đồ + danh sách index):
+- type: code
+  filename: docs/erd.md
+  lang: markdown
+  content: |
+    # Sơ đồ ERD — Mini-Wiki v1
+
+    > ERD (Entity-Relationship Diagram): sơ đồ thực thể-quan hệ — mô tả có bảng nào, cột gì, nối nhau ra sao.
+
+    ## 1. articles — Bài viết
+
+    | Cột | Kiểu | Ràng buộc | Ghi chú |
+    |---|---|---|---|
+    | id | INT | PK, AUTO_INCREMENT | Khóa chính nội bộ |
+    | title | VARCHAR(255) | NOT NULL | Tiêu đề bài viết |
+    | slug | VARCHAR(255) | NOT NULL, UNIQUE | Định danh trong URL, tự sinh từ title |
+    | content | TEXT | NOT NULL | Nội dung Markdown thuần |
+    | published_at | TIMESTAMPTZ | NULLABLE | NULL = bản nháp; có giá trị = đã đăng |
+    | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Tự ghi khi tạo |
+    | updated_at | TIMESTAMPTZ | NOT NULL | Tự cập nhật khi sửa (Prisma @updatedAt) |
+
+    Vì sao slug UNIQUE: slug dùng trong URL (/articles/:slug). Hai bài cùng slug gây xung đột routing, phải chặn ngay ở tầng DB.
+
+    Vì sao tách content (TEXT) khỏi title (VARCHAR): Markdown có thể dài hàng chục nghìn ký tự; danh sách bài chỉ cần title+slug, không kéo cả content giúp query nhẹ.
+
+    ## 2. tags — Nhãn
+
+    | Cột | Kiểu | Ràng buộc | Ghi chú |
+    |---|---|---|---|
+    | id | INT | PK, AUTO_INCREMENT | Khóa chính |
+    | name | VARCHAR(100) | NOT NULL, UNIQUE | Tên hiển thị (ví dụ "JavaScript") |
+    | slug | VARCHAR(100) | NOT NULL, UNIQUE | Dùng trong URL filter (ví dụ javascript) |
+    | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Tự ghi khi tạo |
+
+    ## 3. article_tags — Bảng Nối (Junction Table)
+
+    Bảng trung gian thể hiện quan hệ nhiều-nhiều. Mỗi hàng = một cặp (bài viết, tag).
+
+    | Cột | Kiểu | Ràng buộc | Ghi chú |
+    |---|---|---|---|
+    | article_id | INT | FK to articles.id, ON DELETE CASCADE | Xóa bài thì liên kết tự xóa theo |
+    | tag_id | INT | FK to tags.id, ON DELETE RESTRICT | Tag còn liên kết bài thì KHÔNG cho xóa |
+    | (PK) | (article_id, tag_id) | PRIMARY KEY composite | Ngăn gắn trùng tag vào cùng một bài |
+
+    ON DELETE CASCADE vs RESTRICT:
+    - article_id CASCADE: xóa bài thì liên kết tag xóa theo (hợp lý).
+    - tag_id RESTRICT: xóa tag khi còn bài gắn thì DB từ chối, tầng app bắt lỗi và trả 409 Conflict.
+
+    ## 4. Index cần tạo
+
+    | Index | Bảng | Cột | Loại | Mục đích |
+    |---|---|---|---|---|
+    | articles_slug_idx | articles | slug | UNIQUE B-Tree | Tìm nhanh bài theo slug |
+    | articles_fts_idx | articles | to_tsvector(title, content) | GIN | Full-Text Search |
+    | tags_slug_idx | tags | slug | UNIQUE B-Tree | Tìm tag theo slug |
+    | article_tags_tag_idx | article_tags | tag_id | B-Tree | Lọc bài theo tag hiệu quả |
+- type: callout
+  variant: warning
+  content: |
+    **Bẫy thường gặp — CASCADE vs RESTRICT.** Nhiều người để cả hai khóa ngoại đều CASCADE cho "tiện". Nhưng nếu xóa một tag mà CASCADE, mọi liên kết của tag đó với các bài viết sẽ biến mất âm thầm — bài viết mất tag mà người dùng không hề hay. Dùng **RESTRICT** cho `tag_id` buộc hệ thống báo lỗi rõ ràng, bảo vệ dữ liệu.
+- type: callout
+  variant: info
+  content: |
+    **Vì sao index FTS dùng dictionary "simple" chứ không phải "vietnamese"?** PostgreSQL không có từ điển tiếng Việt built-in. Dictionary `simple` chỉ lowercase + tách từ theo khoảng trắng — đủ tốt cho tìm kiếm cơ bản và không phụ thuộc extension ngoài.
+- type: command
+  label: Lưu mốc bước 1.2
+  content: |
+    git add docs/erd.md
+    git commit -m "[step-1.2] ERD diagram (Mermaid) trong docs/erd.md"
+- type: resource
+  label: Commit đối chiếu trên repo mẫu (step-1.2)
+  url: https://github.com/KouTaru99/mini-wiki/commit/851ce22
+  kind: docs

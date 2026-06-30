@@ -1,11 +1,107 @@
 id: req-03
-title: Phác hợp đồng API
+title: Phác hợp đồng API (API Contract)
 order: 3
-est_minutes: 15
-goal: Liệt kê các endpoint API sẽ cần.
-deliverable: docs/api.md liệt kê method + path.
-outcome_preview: Bạn sẽ có danh sách API để bám theo khi viết backend.
+est_minutes: 25
+commit_ref: a65e939
+goal: Định nghĩa "giao kèo" giữa front-end và back-end — có endpoint nào, gửi gì, nhận gì, lỗi ra sao.
+deliverable: docs/api.md liệt kê 9 endpoint + schema JSON request/response + bảng mã lỗi.
+outcome_preview: Bạn sẽ có bản hợp đồng API để front-end và back-end bám theo làm song song mà không chờ nhau.
 blocks:
 - type: prose
-  content: 'Liệt kê trước các endpoint: CRUD bài viết, CRUD tag, tìm kiếm. Có danh sách này thì viết code
-    không bị thiếu.'
+  content: |
+    Việc cuối của giai đoạn yêu cầu: phác **API Contract (hợp đồng API)** — tài liệu mô tả giao kèo giữa front-end và back-end: có những endpoint nào, gửi dữ liệu gì, nhận lại gì, lỗi trả ra sao.
+
+    Vì sao quan trọng: có hợp đồng rõ ràng thì người làm back-end và người làm front-end có thể **làm song song** — mỗi bên bám hợp đồng, không phải chờ bên kia code xong. Đây mới là *bản phác thảo (sketch)*; nó sẽ được hình thức hóa thành file OpenAPI 3.0 chính thức ở Chặng 2.
+- type: prose
+  content: |
+    Mini-Wiki có 9 endpoint chia 3 nhóm: **Articles** (5), **Tags** (3), **Search** (1). Copy nội dung dưới vào `docs/api.md`:
+- type: code
+  filename: docs/api.md
+  lang: markdown
+  content: |
+    # Hợp đồng API (API Contract) — Mini-Wiki v1
+
+    > API Contract: tài liệu mô tả giao kèo giữa Front-end và Back-end. Đây là bản phác thảo, sẽ hình thức hóa thành OpenAPI 3.0 ở Chặng 2.
+    > Base URL: http://localhost:3000/api (dev)
+    > Định dạng: JSON (Content-Type: application/json)
+
+    ## 1. Articles — Bài viết
+
+    | # | Method | Endpoint | Mô tả |
+    |---|---|---|---|
+    | A1 | GET | /articles | Lấy danh sách bài viết (hỗ trợ ?tag=, ?page=, ?limit=) |
+    | A2 | POST | /articles | Tạo bài viết mới |
+    | A3 | GET | /articles/:slug | Lấy chi tiết một bài viết theo slug |
+    | A4 | PUT | /articles/:slug | Cập nhật bài viết |
+    | A5 | DELETE | /articles/:slug | Xóa bài viết |
+
+    Ví dụ response GET /articles (lưu ý: KHÔNG trả content để giảm payload):
+
+        {
+          "data": [
+            { "id": 1, "title": "Học Git cơ bản", "slug": "hoc-git-co-ban",
+              "published_at": "2026-06-28T07:00:00.000Z",
+              "tags": [ { "id": 2, "name": "Git", "slug": "git" } ] }
+          ],
+          "meta": { "total": 42, "page": 1, "limit": 20 }
+        }
+
+    Ví dụ body POST /articles:
+
+        {
+          "title": "Học Git cơ bản",
+          "content": "## Giới thiệu\nGit là hệ thống quản lý phiên bản...",
+          "published_at": "2026-06-28T07:00:00.000Z",
+          "tagIds": [2, 5]
+        }
+
+    - title (string, bắt buộc, tối đa 255), content (string, bắt buộc, Markdown)
+    - published_at (ISO 8601, tùy chọn, NULL = nháp), tagIds (int[], tùy chọn)
+    - Response 201: object Article đầy đủ. Lỗi: 400 (thiếu/sai trường), 409 (slug trùng), 500.
+
+    GET /articles/:slug trả Article đầy đủ (có content). Lỗi: 404, 500.
+    PUT /articles/:slug: mọi trường tùy chọn; nếu gửi tagIds thì THAY THẾ toàn bộ tag (không merge). Lỗi: 400, 404, 409, 500.
+    DELETE /articles/:slug: trả 204 No Content; article_tags xóa cascade. Lỗi: 404, 500.
+
+    ## 2. Tags — Nhãn
+
+    | # | Method | Endpoint | Mô tả |
+    |---|---|---|---|
+    | T1 | GET | /tags | Lấy danh sách toàn bộ tag |
+    | T2 | POST | /tags | Tạo tag mới (body: { "name": "TypeScript" }) |
+    | T3 | DELETE | /tags/:id | Xóa tag theo ID |
+
+    - T2 Response 201: { id, name, slug, created_at }. Lỗi: 400, 409 (tên/slug trùng), 500.
+    - T3 Response 204. Lỗi: 404, 409 (tag còn liên kết bài viết — TAG_IN_USE), 500.
+
+    ## 3. Search — Tìm kiếm
+
+    | # | Method | Endpoint | Mô tả |
+    |---|---|---|---|
+    | S1 | GET | /search?q=tu-khoa | Full-Text Search trên title + content |
+
+    - q (string, bắt buộc), page/limit (tùy chọn). Lỗi: 400 (thiếu q), 500.
+
+    ## 4. Bảng mã lỗi
+
+    Mọi lỗi theo cấu trúc: { "error": { "code": "SLUG_CONFLICT", "message": "..." } }
+
+    | HTTP | Khi nào | Ví dụ code |
+    |---|---|---|
+    | 400 Bad Request | Thiếu trường, sai kiểu, vi phạm validation | MISSING_FIELD, QUERY_REQUIRED |
+    | 404 Not Found | Không tìm thấy article/tag | ARTICLE_NOT_FOUND, TAG_NOT_FOUND |
+    | 409 Conflict | Slug/tên trùng; hoặc xóa tag còn liên kết | SLUG_CONFLICT, TAG_IN_USE |
+    | 500 Internal Server Error | Lỗi server không mong muốn | INTERNAL_ERROR |
+- type: callout
+  variant: info
+  content: |
+    **Vì sao GET /articles không trả về content?** Khi hiển thị *danh sách*, ta chỉ cần tiêu đề + slug + ngày. Nội dung Markdown của mỗi bài có thể rất dài — kéo cả `content` của 20 bài về chỉ để hiện danh sách là lãng phí băng thông. `content` chỉ trả ở endpoint *chi tiết* (A3). Đây là một thói quen tối ưu API rất phổ biến.
+- type: command
+  label: Lưu mốc bước 1.3 — kết thúc Chặng 1
+  content: |
+    git add docs/api.md
+    git commit -m "[step-1.3] sketch API contract trong docs/api.md"
+- type: resource
+  label: Commit đối chiếu trên repo mẫu (step-1.3)
+  url: https://github.com/KouTaru99/mini-wiki/commit/a65e939
+  kind: docs

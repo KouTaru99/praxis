@@ -1,4 +1,41 @@
+import type { ReactNode } from 'react';
 import type { Block } from '@/lib/types';
+
+// Markdown-lite: parse **đậm**, *nghiêng* và `inline-code` ra React nodes (an toàn, không innerHTML).
+// Không lồng nhau (parser 1 cấp): tránh viết `code` bên trong **bold**.
+function renderInline(text: string): ReactNode[] {
+  const tokens = text.split(/(\*\*.+?\*\*|\*[^*]+\*|`[^`]+`)/g);
+  return tokens.map((tok, i) => {
+    if (/^\*\*.+\*\*$/.test(tok)) {
+      return (
+        <strong key={i} style={{ fontWeight: 600 }}>
+          {tok.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (/^\*[^*]+\*$/.test(tok)) {
+      return <em key={i}>{tok.slice(1, -1)}</em>;
+    }
+    if (/^`[^`]+`$/.test(tok)) {
+      return (
+        <code
+          key={i}
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: '0.88em',
+            background: 'var(--color-background-secondary)',
+            border: '0.5px solid var(--color-border-tertiary)',
+            borderRadius: 4,
+            padding: '1px 5px',
+          }}
+        >
+          {tok.slice(1, -1)}
+        </code>
+      );
+    }
+    return tok;
+  });
+}
 
 const CALLOUT_STYLE: Record<
   NonNullable<Block['variant']>,
@@ -55,7 +92,7 @@ function OneBlock({ block }: { block: Block }) {
     case 'prose':
       return (
         <p style={{ fontSize: 15, lineHeight: 1.7, margin: '0 0 14px', whiteSpace: 'pre-wrap' }}>
-          {block.content}
+          {renderInline(block.content)}
         </p>
       );
 
@@ -118,7 +155,7 @@ function OneBlock({ block }: { block: Block }) {
         >
           <i className={`ti ${s.icon}`} style={{ fontSize: 17, color: s.iconColor, marginTop: 1 }} />
           <span style={{ fontSize: 13.5, lineHeight: 1.65 }}>
-            <b style={{ fontWeight: 500, color: s.labelColor }}>{s.label}:</b> {block.content}
+            <b style={{ fontWeight: 500, color: s.labelColor }}>{s.label}:</b> {renderInline(block.content)}
           </span>
         </div>
       );
