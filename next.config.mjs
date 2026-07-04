@@ -1,7 +1,13 @@
+const isProd = process.env.NODE_ENV === 'production';
+
+// Praxis Platform = nội dung tĩnh chỉ đọc → static export lên GitHub Pages ($0).
+// basePath chỉ bật khi build production để `npm run dev` vẫn chạy ở localhost:3000/ (root).
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Praxis Platform = nội dung tĩnh; bật static export khi deploy (Vercel/CDN).
-  // Để dev + nghiệm browser thì giữ mặc định.
+  output: 'export',
+  basePath: isProd ? '/praxis' : '',
+  images: { unoptimized: true },
+  trailingSlash: true,
 };
 
 export default nextConfig;
