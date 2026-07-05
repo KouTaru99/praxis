@@ -1,0 +1,90 @@
+id: gi-04
+title: 'identity: endpoint nội bộ cho gateway'
+order: 4
+est_minutes: 25
+commit_ref: 37d949c
+goal: Mở endpoint nội bộ GET /internal/keys/{hash} để gateway tra cứu key khi xác thực, và cập nhật last_used_at không chặn response.
+deliverable: InternalKeyController + bật @EnableAsync trên IdentityApplication.
+outcome_preview: 'Sau bước này, identity đã sẵn sàng cho gateway hỏi: đưa hash → trả tenant nếu key còn hiệu lực, 404 nếu không. Đây là mảnh ghép cuối trước khi dựng gateway.'
+blocks:
+- type: prose
+  content: |
+    identity có hai nhóm endpoint với hai đối tượng khác nhau:
+
+    - `/api/v1/**` — **công khai**, cho tenant qua gateway (đã làm ở 2.3).
+    - `/internal/**` — **nội bộ**, chỉ gateway trong mạng Docker gọi, KHÔNG lộ ra ngoài.
+
+    Endpoint nội bộ nhận key hash, tra key active, trả về `tenantId` + `planId`. Nếu key không tồn tại hoặc đã revoke → ném `KeyNotFoundException` → 404 (nhờ handler bước 2.3). Nó cũng gọi `updateLastUsedAtAsync` — ghi lại thời điểm dùng key gần nhất **ở thread khác**, không bắt gateway chờ.
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/controller/InternalKeyController.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.controller;
+
+    import com.marketpulse.identity.domain.ApiKey;
+    import com.marketpulse.identity.dto.InternalKeyResponse;
+    import com.marketpulse.identity.exception.KeyNotFoundException;
+    import com.marketpulse.identity.repository.ApiKeyRepository;
+    import com.marketpulse.identity.service.ApiKeyService;
+    import org.springframework.web.bind.annotation.GetMapping;
+    import org.springframework.web.bind.annotation.PathVariable;
+    import org.springframework.web.bind.annotation.RestController;
+
+    @RestController
+    public class InternalKeyController {
+
+        private final ApiKeyRepository apiKeyRepository;
+        private final ApiKeyService apiKeyService;
+
+        public InternalKeyController(ApiKeyRepository apiKeyRepository, ApiKeyService apiKeyService) {
+            this.apiKeyRepository = apiKeyRepository;
+            this.apiKeyService = apiKeyService;
+        }
+
+        // Chỉ dùng nội bộ Docker network — gateway gọi để xác thực raw key
+        @GetMapping("/internal/keys/{keyHash}")
+        public InternalKeyResponse getByHash(@PathVariable String keyHash) {
+            ApiKey key = apiKeyRepository.findActiveByKeyHash(keyHash)
+                    .orElseThrow(() -> new KeyNotFoundException(keyHash));
+
+            // Cập nhật last_used_at không chặn response
+            apiKeyService.updateLastUsedAtAsync(key.getId());
+
+            return new InternalKeyResponse(
+                    key.getTenant().getId(),
+                    key.getTenant().getPlan().getId(),
+                    "ACTIVE"
+            );
+        }
+    }
+- type: prose
+  content: 'Để `@Async` hoạt động, phải bật nó ở lớp cấu hình ứng dụng:'
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/IdentityApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.identity;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+    import org.springframework.scheduling.annotation.EnableAsync;
+
+    @SpringBootApplication
+    @EnableAsync
+    public class IdentityApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(IdentityApplication.class, args);
+        }
+    }
+- type: callout
+  variant: info
+  content: 'Tách endpoint `/internal/**` khỏi `/api/v1/**` là quy ước bảo mật quan trọng: khi triển khai thật, cổng vào (gateway) chỉ route các path `/api/v1/**` ra ngoài, còn `/internal/**` bị chặn — người ngoài không thể tự tra hash để dò key hợp lệ.'
+- type: command
+  label: Lưu mốc bước 2.4
+  content: |
+    git add identity
+    git commit -m "[step-2.4] identity: GET /internal/keys/{hash} cho gateway + lastUsedAt async"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/37d949c

@@ -1,0 +1,157 @@
+id: gi-09
+title: 'Milestone Chặng 2: smoke test 8 ca xuyên gateway'
+order: 9
+est_minutes: 30
+commit_ref: 4b20ed0
+goal: Bật cả cụm profile core và chạy smoke test tự động 8 ca chứng minh gateway xác thực đúng — kể cả ca revoke key sau khi TTL cache hết.
+deliverable: 'scripts/smoke-ch2.sh (8 ca curl xuyên gateway) + docs/smoke-ch2.md; milestone: profile core chạy được.'
+outcome_preview: 'Milestone Chặng 2 đạt: docker compose --profile core up → key đúng 200, key sai 401, key revoke 401 sau 5s. Cổng vào và danh tính hoạt động end-to-end.'
+blocks:
+- type: prose
+  content: 'Chốt chặng bằng **smoke test** — kịch bản curl chạy tự động, xác nhận cả cụm hoạt động đúng từ ngoài vào. Trước hết bật profile core (gateway + identity + db):'
+- type: command
+  label: Bật cụm profile core
+  content: |
+    cp infra/.env.example infra/.env   # neu chua co
+    docker compose -f infra/docker-compose.yml --env-file infra/.env --profile core up -d --build
+
+    # doi ~30s cho 3 container healthy, kiem tra:
+    docker compose -f infra/docker-compose.yml --profile core ps
+- type: prose
+  content: 'Script smoke gồm 8 ca, đi từ dễ tới ca khó nhất — key vừa bị revoke phải bị chặn **sau khi TTL cache 5 giây hết hạn** (script chờ 6s rồi thử lại):'
+- type: code
+  filename: scripts/smoke-ch2.sh
+  lang: bash
+  content: |
+    #!/usr/bin/env bash
+    # smoke-ch2.sh — Milestone Chặng 2: gateway auth end-to-end
+    # Yêu cầu: docker compose --profile core up -d đã chạy và tất cả service healthy
+    # Cách chạy: bash scripts/smoke-ch2.sh
+    # Biến tuỳ chọn: GATEWAY_URL (mặc định http://localhost:8080)
+
+    set -uo pipefail
+
+    GW="${GATEWAY_URL:-http://localhost:8080}"
+    DEMO_KEY="demo-key-acme-2026"
+    PASS=0
+    FAIL=0
+
+    TMPFILE=$(mktemp /tmp/smoke-ch2.XXXXXX)
+    trap 'rm -f "${TMPFILE}"' EXIT
+
+    check() {
+        local label="$1" got="$2" want="$3"
+        if [ "$got" = "$want" ]; then
+            echo "PASS  ${label}"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL  ${label}  (got=${got}, want=${want})"
+            FAIL=$((FAIL + 1))
+        fi
+    }
+
+    echo "=== Smoke test Chặng 2 — gateway: ${GW} ==="
+    echo ""
+
+    # ── TC1: thiếu X-API-Key → 401 ────────────────────────────────────────────
+    status=$(curl -s -o /dev/null -w "%{http_code}" "${GW}/api/v1/keys")
+    check "TC1  no X-API-Key header         → 401" "$status" "401"
+
+    # ── TC2: key sai → 401 ────────────────────────────────────────────────────
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "X-API-Key: obviously-wrong-key-xyz" \
+        "${GW}/api/v1/keys")
+    check "TC2  wrong key                   → 401" "$status" "401"
+
+    # ── TC3: demo key đúng → 200 ──────────────────────────────────────────────
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "X-API-Key: ${DEMO_KEY}" \
+        "${GW}/api/v1/keys")
+    check "TC3  demo key valid              → 200" "$status" "200"
+
+    # ── TC4: POST tạo key mới → 200 có field createdAt ────────────────────────
+    create_status=$(curl -s -o "${TMPFILE}" -w "%{http_code}" \
+        -X POST "${GW}/api/v1/keys" \
+        -H "X-API-Key: ${DEMO_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{"label":"smoke-ch2"}')
+    create_body=$(cat "${TMPFILE}")
+
+    check "TC4  POST /api/v1/keys           → 200" "$create_status" "200"
+
+    has_created_at=$(echo "${create_body}" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print('yes' if 'createdAt' in d else 'no')" \
+        2>/dev/null || echo "no")
+    check "TC4  response has createdAt      → yes" "${has_created_at}" "yes"
+
+    # Lấy id và raw key từ response
+    new_id=$(echo "${create_body}" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+    new_raw_key=$(echo "${create_body}" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(d.get('key',''))" 2>/dev/null || echo "")
+
+    if [ -z "${new_id}" ] || [ -z "${new_raw_key}" ]; then
+        echo "FAIL  TC4: không parse được id/key từ response — dừng sớm"
+        FAIL=$((FAIL + 1))
+        echo ""
+        echo "=== Kết quả: PASS=${PASS}  FAIL=${FAIL} ==="
+        exit 1
+    fi
+
+    # ── TC4b: dùng key mới → 200 (đồng thời đưa key vào Caffeine cache) ───────
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "X-API-Key: ${new_raw_key}" \
+        "${GW}/api/v1/keys")
+    check "TC4b new key GET /api/v1/keys    → 200" "$status" "200"
+
+    # ── TC5: DELETE key → 204 ─────────────────────────────────────────────────
+    del_status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X DELETE "${GW}/api/v1/keys/${new_id}" \
+        -H "X-API-Key: ${DEMO_KEY}")
+    check "TC5  DELETE /api/v1/keys/{id}    → 204" "$del_status" "204"
+
+    # Đợi 6s — quá TTL cache 5s, gateway phải re-lookup identity và nhận 404
+    echo "      [sleep 6s — chờ Caffeine cache TTL 5s hết hạn...]"
+    sleep 6
+
+    # ── TC5b: key đã revoke → 401 ─────────────────────────────────────────────
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "X-API-Key: ${new_raw_key}" \
+        "${GW}/api/v1/keys")
+    check "TC5b revoked key after TTL       → 401" "$status" "401"
+
+    # ── Tổng kết ──────────────────────────────────────────────────────────────
+    echo ""
+    echo "=== Kết quả: PASS=${PASS}  FAIL=${FAIL} ==="
+    if [ "${FAIL}" -eq 0 ]; then
+        echo "PASS  Chặng 2 milestone — gateway auth hoạt động đúng"
+        exit 0
+    else
+        echo "FAIL  Chặng 2 — kiểm tra log: docker logs market-pulse-gateway-1"
+        exit 1
+    fi
+- type: command
+  label: Chạy smoke test Chặng 2
+  content: |
+    bash scripts/smoke-ch2.sh
+    # PASS  TC1  no X-API-Key header    -> 401
+    # PASS  TC2  wrong key              -> 401
+    # PASS  TC3  demo key valid         -> 200
+    # ... TC4/TC4b/TC5
+    # PASS  TC5b revoked key after TTL  -> 401
+    # === Ket qua: PASS=8  FAIL=0 ===
+- type: callout
+  variant: tip
+  content: 'Ca TC5b là ca giá trị nhất: nó chứng minh cả chuỗi negative-cache hoạt động — revoke ghi vào DB, nhưng gateway vẫn cho key cũ đi qua tới khi cache 5s hết, rồi mới re-lookup và nhận 404 → 401. Test đúng cái *đánh đổi* mà bước 2.6 đã chọn, không giấu nó đi.'
+- type: command
+  label: Lưu mốc bước 2.9 — milestone Chặng 2
+  content: |
+    git add scripts/smoke-ch2.sh docs/smoke-ch2.md
+    git commit -m "[step-2.9] smoke-ch2.sh: 8 ca xuyen gateway (401/200/revoke-sau-TTL) + docs"
+- type: callout
+  variant: info
+  content: 'Milestone Chặng 2 đạt: profile core chạy được, gateway xác thực đúng 8/8 ca. Phần A (Nền móng) hoàn tất. Chặng 3 mở Phần B — market-feed kết nối WebSocket Binance và lần đầu bạn thấy dữ liệu giao dịch THẬT chảy vào hệ thống.'
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.9)
+  url: https://github.com/KouTaru99/market-pulse/commit/4b20ed0

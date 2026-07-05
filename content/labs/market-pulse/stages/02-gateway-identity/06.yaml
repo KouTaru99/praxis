@@ -1,0 +1,165 @@
+id: gi-06
+title: 'gateway: filter xác thực API key'
+order: 6
+est_minutes: 45
+commit_ref: 7f2d98d
+goal: 'Viết filter toàn cục của gateway: chặn mọi request, băm key, tra cache Caffeine rồi hỏi identity, gắn X-Tenant-Id trước khi forward.'
+deliverable: ApiKeyAuthFilter (WebFlux GlobalFilter) — cache 3 trạng thái, 401/503, loại trừ /actuator.
+outcome_preview: 'Sau bước này, gateway đã biết gác cổng: request không có key hoặc key sai bị chặn 401, key đúng được gắn danh tính tenant rồi cho đi tiếp.'
+blocks:
+- type: prose
+  content: |
+    Đây là trái tim của gateway. `ApiKeyAuthFilter` là một **GlobalFilter** — chạy TRƯỚC mọi route, cho mọi request. Luồng xử lý:
+
+    1. Bỏ qua `/actuator/**` (để Docker healthcheck vào được mà không cần key).
+    2. Lấy `X-API-Key`; thiếu → 401.
+    3. Băm SHA-256, tra **cache Caffeine** (bộ nhớ tạm trong RAM, TTL 5 giây).
+    4. Cache miss → gọi `identity /internal/keys/{hash}` (timeout 2s).
+    5. Key hợp lệ → cache lại, gắn `X-Tenant-Id`, **xoá** `X-API-Key`, forward.
+    6. 404 → cache "âm", trả 401. 5xx/timeout → 503 (không cache, để thử lại khi identity hồi phục).
+
+    Code viết theo phong cách **reactive/WebFlux** (`Mono`, non-blocking) — vì Spring Cloud Gateway chạy trên nền non-blocking, không được chặn luồng khi chờ identity trả lời.
+- type: code
+  filename: gateway/src/main/java/com/marketpulse/gateway/filter/ApiKeyAuthFilter.java
+  lang: java
+  content: |
+    package com.marketpulse.gateway.filter;
+
+    import com.github.benmanes.caffeine.cache.Cache;
+    import com.github.benmanes.caffeine.cache.Caffeine;
+    import org.springframework.beans.factory.annotation.Value;
+    import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+    import org.springframework.cloud.gateway.filter.GlobalFilter;
+    import org.springframework.core.Ordered;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.http.MediaType;
+    import org.springframework.http.server.reactive.ServerHttpRequest;
+    import org.springframework.stereotype.Component;
+    import org.springframework.web.reactive.function.client.WebClient;
+    import org.springframework.web.reactive.function.client.WebClientResponseException;
+    import org.springframework.web.server.ServerWebExchange;
+    import reactor.core.publisher.Mono;
+
+    import java.nio.charset.StandardCharsets;
+    import java.security.MessageDigest;
+    import java.security.NoSuchAlgorithmException;
+    import java.time.Duration;
+    import java.util.Optional;
+    import java.util.concurrent.TimeUnit;
+
+    /**
+     * Auth filter chạy trước mọi route filter.
+     * Flow: X-API-Key → SHA-256 → Caffeine cache(TTL 5s) → identity lookup → forward với X-Tenant-Id.
+     * Loại trừ /actuator/** để compose healthcheck hoạt động.
+     */
+    @Component
+    public class ApiKeyAuthFilter implements GlobalFilter, Ordered {
+
+        private static final String HEADER_API_KEY = "X-API-Key";
+        private static final String HEADER_TENANT_ID = "X-Tenant-Id";
+
+        private final WebClient webClient;
+        // Optional.of(tenantId) = active key; Optional.empty() = revoked/not-found (negative cache)
+        private final Cache<String, Optional<String>> keyCache;
+
+        public ApiKeyAuthFilter(@Value("${identity.service.url}") String identityServiceUrl) {
+            this.webClient = WebClient.builder().baseUrl(identityServiceUrl).build();
+            this.keyCache = Caffeine.newBuilder()
+                    .expireAfterWrite(5, TimeUnit.SECONDS)
+                    .maximumSize(10_000)
+                    .build();
+        }
+
+        @Override
+        public int getOrder() {
+            return Ordered.HIGHEST_PRECEDENCE;
+        }
+
+        @Override
+        public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+            String path = exchange.getRequest().getURI().getPath();
+            if (path.startsWith("/actuator")) {
+                return chain.filter(exchange);
+            }
+
+            String rawKey = exchange.getRequest().getHeaders().getFirst(HEADER_API_KEY);
+            if (rawKey == null || rawKey.isBlank()) {
+                return reject(exchange, HttpStatus.UNAUTHORIZED, "MISSING_API_KEY");
+            }
+
+            String keyHash = sha256Hex(rawKey);
+
+            Optional<String> cached = keyCache.getIfPresent(keyHash);
+            if (cached != null) {
+                if (cached.isEmpty()) {
+                    return reject(exchange, HttpStatus.UNAUTHORIZED, "INVALID_API_KEY");
+                }
+                return forward(exchange, chain, cached.get());
+            }
+
+            return webClient.get()
+                    .uri("/internal/keys/" + keyHash)
+                    .retrieve()
+                    .bodyToMono(KeyLookupResponse.class)
+                    .timeout(Duration.ofSeconds(2))
+                    .flatMap(resp -> {
+                        keyCache.put(keyHash, Optional.of(resp.tenantId()));
+                        return forward(exchange, chain, resp.tenantId());
+                    })
+                    .onErrorResume(e -> {
+                        if (e instanceof WebClientResponseException wex && wex.getStatusCode().value() == 404) {
+                            keyCache.put(keyHash, Optional.empty());
+                            return reject(exchange, HttpStatus.UNAUTHORIZED, "INVALID_API_KEY");
+                        }
+                        // 5xx hoặc timeout — không cache để gateway thử lại khi identity hồi phục
+                        return reject(exchange, HttpStatus.SERVICE_UNAVAILABLE, "IDENTITY_UNAVAILABLE");
+                    });
+        }
+
+        private Mono<Void> forward(ServerWebExchange exchange, GatewayFilterChain chain, String tenantId) {
+            ServerHttpRequest mutated = exchange.getRequest().mutate()
+                    .header(HEADER_TENANT_ID, tenantId)
+                    .headers(h -> h.remove(HEADER_API_KEY))
+                    .build();
+            return chain.filter(exchange.mutate().request(mutated).build());
+        }
+
+        private Mono<Void> reject(ServerWebExchange exchange, HttpStatus status, String errorCode) {
+            exchange.getResponse().setStatusCode(status);
+            exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
+            byte[] body = ("{\"error\":\"" + errorCode + "\"}").getBytes(StandardCharsets.UTF_8);
+            return exchange.getResponse().writeWith(
+                    Mono.just(exchange.getResponse().bufferFactory().wrap(body)));
+        }
+
+        private static String sha256Hex(String input) {
+            try {
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
+                StringBuilder sb = new StringBuilder(64);
+                for (byte b : hash) {
+                    sb.append(String.format("%02x", b));
+                }
+                return sb.toString();
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("SHA-256 unavailable", e);
+            }
+        }
+
+        private record KeyLookupResponse(String tenantId, String planId, String status) {}
+    }
+- type: callout
+  variant: info
+  content: 'Cache dùng `Optional<String>` để lưu **3 trạng thái**, không phải 2: có trong cache + có tenant (`Optional.of`) = key hợp lệ; có trong cache + rỗng (`Optional.empty`) = *negative cache*, key đã biết là sai/revoke; không có trong cache (`null`) = chưa biết, phải hỏi identity. Negative cache tránh việc kẻ tấn công dội key sai liên tục làm identity quá tải.'
+- type: callout
+  variant: warning
+  content: 'TTL cache 5 giây là một *đánh đổi* có chủ đích: key vừa bị revoke vẫn có thể lọt qua tối đa 5 giây (tới khi cache hết hạn). Chấp nhận được cho lab; hệ thật cần thu hồi tức thì sẽ dùng cơ chế push (identity chủ động báo gateway) — nhưng phức tạp hơn nhiều.'
+- type: command
+  label: Lưu mốc bước 2.6
+  content: |
+    git add gateway/src
+    git commit -m "[step-2.6] gateway: ApiKeyAuthFilter — SHA-256 lookup identity, Caffeine 5s (cache ca negative), 401/503"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.6)
+  url: https://github.com/KouTaru99/market-pulse/commit/7f2d98d

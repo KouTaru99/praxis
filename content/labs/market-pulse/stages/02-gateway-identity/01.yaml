@@ -1,0 +1,158 @@
+id: gi-01
+title: 'identity: schema database bằng Flyway + seed demo'
+order: 1
+est_minutes: 35
+commit_ref: da13745
+goal: 'Dựng database cho identity: 3 bảng (plans/tenants/api_keys) bằng migration Flyway, kèm seed một tenant demo và một API key demo.'
+deliverable: V1__init.sql (3 bảng + partial index) + V2__seed.sql (plan/tenant/key demo) + cấu hình datasource & Flyway trong application.yml.
+outcome_preview: 'Sau bước này, identity có một database phiên-bản-hoá: khởi động là Flyway tự tạo bảng, và đã có sẵn một key demo để test toàn bộ Chặng 2.'
+blocks:
+- type: prose
+  content: 'Chặng 2 thổi sự sống vào cặp service đầu tiên. **identity** là service danh tính: nó quản lý *tenant* (khách B2B), *plan* (gói cước) và *API key* (chìa khoá tenant dùng để gọi hệ thống). **gateway** là cổng vào duy nhất: mọi request phải qua nó, và nó hỏi identity xem key có hợp lệ không trước khi cho đi tiếp.'
+- type: diagram
+  content: |
+    sequenceDiagram
+      participant KH as Khach (curl)
+      participant GW as gateway :8080
+      participant ID as identity :8081
+      participant DB as identity-db
+      KH->>GW: GET /api/v1/keys (X-API-Key: raw)
+      GW->>GW: SHA-256(raw) = hash
+      GW->>GW: Caffeine cache? (TTL 5s)
+      GW->>ID: GET /internal/keys/{hash}
+      ID->>DB: SELECT active key by hash
+      DB-->>ID: tenant_id + plan
+      ID-->>GW: 200 tenantId
+      GW->>GW: cache put; them X-Tenant-Id; xoa X-API-Key
+      GW->>ID: forward GET /api/v1/keys
+      ID-->>KH: 200 danh sach key
+- type: prose
+  content: |
+    Bắt đầu từ database. Ta dùng **Flyway** — công cụ *quản lý phiên bản schema*: mỗi thay đổi cấu trúc DB là một file `V<số>__<tên>.sql` chạy đúng một lần theo thứ tự, và Flyway ghi lại đã chạy tới đâu. Nhờ vậy DB ở mọi máy (của bạn, của CI, của production) luôn cùng một trạng thái — không còn cảnh "máy tôi chạy được".
+
+    Trước tiên khai dependency Flyway + JPA + Postgres cho identity, và trỏ datasource:
+- type: code
+  filename: identity/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+        implementation("org.springframework.boot:spring-boot-starter-validation")
+        implementation("org.flywaydb:flyway-core")
+        implementation("org.flywaydb:flyway-database-postgresql")
+        runtimeOnly("org.postgresql:postgresql")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: identity/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8081
+
+    spring:
+      application:
+        name: identity
+      datasource:
+        url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/identity}
+        username: ${SPRING_DATASOURCE_USERNAME:identity_user}
+        password: ${SPRING_DATASOURCE_PASSWORD:change_me}
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        open-in-view: false
+      flyway:
+        enabled: true
+      jackson:
+        serialization:
+          write-dates-as-timestamps: false
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: callout
+  variant: info
+  content: '`ddl-auto: validate` là lựa chọn có chủ đích: Hibernate KHÔNG tự tạo/sửa bảng (dễ lệch thầm lặng giữa các môi trường), mà chỉ *kiểm tra* entity Java có khớp schema Flyway đã tạo không. Schema là do Flyway làm chủ, JPA chỉ đọc.'
+- type: prose
+  content: 'Migration đầu tiên `V1__init.sql` tạo 3 bảng. Chú ý **partial index** ở cuối: chỉ đánh index trên các key còn hiệu lực (`revoked_at IS NULL`) — vì gateway chỉ bao giờ tra key active, index gọn hơn và tra nhanh hơn.'
+- type: code
+  filename: identity/src/main/resources/db/migration/V1__init.sql
+  lang: sql
+  content: |
+    CREATE TABLE plans (
+        id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        name         VARCHAR(50)  NOT NULL,
+        max_rules    INT          NOT NULL,
+        max_alerts_pm INT         NOT NULL
+    );
+
+    CREATE TABLE tenants (
+        id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        name       VARCHAR(100) NOT NULL,
+        plan_id    UUID         NOT NULL REFERENCES plans(id),
+        status     VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE',
+        created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE api_keys (
+        id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id    UUID        NOT NULL REFERENCES tenants(id),
+        key_hash     VARCHAR(64) NOT NULL UNIQUE,
+        label        VARCHAR(100),
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        revoked_at   TIMESTAMPTZ,
+        last_used_at TIMESTAMPTZ
+    );
+
+    -- partial index: chỉ index key active (revoked_at IS NULL)
+    CREATE INDEX idx_api_keys_active ON api_keys(key_hash) WHERE revoked_at IS NULL;
+- type: prose
+  content: 'Migration thứ hai `V2__seed.sql` nạp dữ liệu mẫu: 2 gói cước, 1 tenant "Acme Corp", và 1 API key demo. Điểm cốt yếu: bảng chỉ lưu **SHA-256 hash** của key, không lưu key thô. Raw key `demo-key-acme-2026` chỉ tồn tại ở đây để bạn test — trong đời thật key chỉ hiện đúng một lần lúc tạo.'
+- type: code
+  filename: identity/src/main/resources/db/migration/V2__seed.sql
+  lang: sql
+  content: |
+    -- Plans mẫu: starter và pro
+    INSERT INTO plans (id, name, max_rules, max_alerts_pm) VALUES
+        ('00000000-0000-0000-0000-000000000001', 'starter',  5,  1000),
+        ('00000000-0000-0000-0000-000000000002', 'pro',      20, 10000);
+
+    -- Tenant demo
+    INSERT INTO tenants (id, name, plan_id) VALUES
+        ('00000000-0000-0000-0001-000000000001',
+         'Acme Corp',
+         '00000000-0000-0000-0000-000000000001');
+
+    -- API key demo
+    -- raw key (CHỈ DÙNG LOCAL DEMO): demo-key-acme-2026
+    -- SHA-256 được tính bằng: echo -n "demo-key-acme-2026" | sha256sum
+    INSERT INTO api_keys (id, tenant_id, key_hash, label) VALUES
+        ('00000000-0000-0000-0002-000000000001',
+         '00000000-0000-0000-0001-000000000001',
+         'c353b1e8e03220dea4afd70dc01590685b711e4aab502b61a9c9d277cd459826',
+         'demo');
+- type: callout
+  variant: tip
+  content: 'Vì sao phải seed một key demo? Đây là bài toán *con-gà-quả-trứng*: muốn TẠO key thì phải gọi API, mà muốn gọi API thì phải CÓ key hợp lệ để qua gateway. Seed một key bootstrap phá vỡ vòng lặp đó — một thủ thuật khởi tạo thường gặp ở hệ có xác thực.'
+- type: command
+  label: Lưu mốc bước 2.1
+  content: |
+    git add identity
+    git commit -m "[step-2.1] identity: Flyway V1 schema (plans/tenants/api_keys) + V2 seed demo + datasource env"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/da13745

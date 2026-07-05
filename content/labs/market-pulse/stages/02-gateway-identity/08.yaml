@@ -1,0 +1,70 @@
+id: gi-08
+title: 'gateway: Dockerfile + sửa healthcheck compose'
+order: 8
+est_minutes: 25
+commit_ref: 561e760
+goal: 'Đóng gói gateway thành image và sửa một bẫy healthcheck: image JRE alpine không có curl.'
+deliverable: gateway/Dockerfile (multi-stage) + đổi healthcheck compose từ curl sang wget cho gateway và identity.
+outcome_preview: Sau bước này, cả gateway lẫn identity đều có image, và healthcheck compose dùng đúng công cụ có sẵn — sẵn sàng cho milestone up cả cụm.
+blocks:
+- type: prose
+  content: 'gateway cần Dockerfile riêng, khuôn giống identity (multi-stage + cache mount + non-root), chỉ khác là build `:gateway:bootJar` và expose cổng 8080:'
+- type: code
+  filename: gateway/Dockerfile
+  lang: dockerfile
+  content: |
+    # Stage 1: Build
+    FROM eclipse-temurin:21-jdk AS builder
+    WORKDIR /workspace
+
+    # Gradle wrapper
+    COPY gradlew ./
+    COPY gradle gradle/
+
+    # Root build config
+    COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+
+    # Build files của mọi subproject (cần để Gradle evaluate settings.gradle.kts)
+    COPY common/build.gradle.kts       common/build.gradle.kts
+    COPY gateway/build.gradle.kts      gateway/build.gradle.kts
+    COPY identity/build.gradle.kts     identity/build.gradle.kts
+    COPY market-feed/build.gradle.kts  market-feed/build.gradle.kts
+    COPY aggregation/build.gradle.kts  aggregation/build.gradle.kts
+    COPY rule-engine/build.gradle.kts  rule-engine/build.gradle.kts
+    COPY alert-delivery/build.gradle.kts alert-delivery/build.gradle.kts
+    COPY billing/build.gradle.kts      billing/build.gradle.kts
+
+    # Source code: chỉ common (dependency nếu có) và gateway
+    COPY common/src  common/src
+    COPY gateway/src gateway/src
+
+    RUN --mount=type=cache,target=/root/.gradle chmod +x gradlew && ./gradlew :gateway:bootJar --no-daemon -x test
+
+    # Stage 2: Runtime
+    FROM eclipse-temurin:21-jre-alpine
+    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+    WORKDIR /app
+    COPY --from=builder /workspace/gateway/build/libs/gateway.jar app.jar
+    USER appuser
+    EXPOSE 8080
+    ENTRYPOINT ["java", "-Xmx256m", "-jar", "app.jar"]
+- type: prose
+  content: 'Và đây là một **bẫy kinh điển** khi đóng gói: file compose khung (Chặng 1) viết healthcheck bằng `curl`, nhưng image `eclipse-temurin:21-jre-alpine` **không có sẵn `curl`**. Kết quả: app sống nhưng healthcheck luôn fail → container bị coi là unhealthy → service `depends_on` không bao giờ khởi động → smoke test toàn 000. Cách sửa: dùng `wget` (busybox trong alpine có sẵn).'
+- type: command
+  label: Sửa healthcheck trong infra/docker-compose.yml
+  content: |
+    # gateway + identity healthcheck — doi curl sang wget:
+    #   test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/actuator/health || exit 1"]
+    #   test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/actuator/health || exit 1"]
+- type: callout
+  variant: warning
+  content: 'Bẫy này tinh vi vì mọi thứ *trông* ổn: `docker compose up` không báo lỗi, log app in "Started". Chỉ khi để ý `STATUS` của container là `unhealthy` mới lộ. Bài học: healthcheck phải dùng đúng công cụ CÓ trong image runtime — kiểm bằng `docker exec <container> which wget` khi nghi ngờ.'
+- type: command
+  label: Lưu mốc bước 2.8
+  content: |
+    git add gateway/Dockerfile infra/docker-compose.yml
+    git commit -m "[step-2.8] gateway: Dockerfile cache-mount + fix healthcheck curl->wget (jre-alpine khong co curl)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.8)
+  url: https://github.com/KouTaru99/market-pulse/commit/561e760

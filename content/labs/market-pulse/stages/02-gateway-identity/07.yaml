@@ -1,0 +1,56 @@
+id: gi-07
+title: 'gateway: định tuyến /api/v1/keys → identity'
+order: 7
+est_minutes: 20
+commit_ref: dbef2b2
+goal: 'Cấu hình route cho gateway: forward /api/v1/keys/** sang identity; để sẵn chỗ cho rules/alerts/usage các chặng sau.'
+deliverable: gateway/application.yml — 1 route tới identity + TODO cho các service chưa dựng.
+outcome_preview: Sau bước này, gateway biết chuyển tiếp request tới đúng service. Cùng với filter 2.6, cổng vào đã hoàn chỉnh về mặt code.
+blocks:
+- type: prose
+  content: |
+    Filter (2.6) lo *xác thực*; route lo *chuyển tiếp*. File cấu hình khai: path `/api/v1/keys/**` thì forward sang identity `:8081`. Các path của service chưa dựng (rules/alerts/usage) được để lại dưới dạng `TODO` — một cách ghi chú lộ trình ngay trong cấu hình.
+
+    Cũng chú ý khối `identity.service.url` ở cuối — đây là biến mà filter 2.6 đọc để biết gọi identity ở đâu, mặc định `localhost:8081` khi chạy ngoài Docker, và được ghi đè bằng biến môi trường khi chạy trong compose.
+- type: code
+  filename: gateway/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8080
+
+    spring:
+      application:
+        name: gateway
+      cloud:
+        gateway:
+          routes:
+            - id: identity-keys
+              uri: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/keys/**
+            # TODO Chặng 5: /api/v1/rules/** → rule-engine:8083
+            # TODO Chặng 6: /api/v1/alerts/** → alert-delivery:8084
+            # TODO Chặng 7: /api/v1/usage/** → billing:8085
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+
+    identity:
+      service:
+        url: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+- type: command
+  label: Lưu mốc bước 2.7
+  content: |
+    git add gateway/src/main/resources/application.yml
+    git commit -m "[step-2.7] gateway: route /api/v1/keys -> identity (rules/alerts/usage de chang sau)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.7)
+  url: https://github.com/KouTaru99/market-pulse/commit/dbef2b2

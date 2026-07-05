@@ -1,0 +1,73 @@
+id: gi-05
+title: 'identity: Dockerfile multi-stage'
+order: 5
+est_minutes: 25
+commit_ref: b8c0a73
+goal: Đóng gói identity thành image Docker bằng multi-stage build, với cache mount Gradle để rebuild nhanh.
+deliverable: identity/Dockerfile (stage build JDK 21 + stage runtime JRE alpine, chạy dưới user non-root).
+outcome_preview: Sau bước này, identity có thể chạy trong container — mảnh cuối để bước 2.8 bật cả cụm profile core.
+blocks:
+- type: prose
+  content: |
+    Để chạy trong Docker Compose, mỗi service cần một image. Ta dùng **multi-stage build** — kỹ thuật chia Dockerfile làm 2 tầng:
+
+    - **Stage build:** dùng JDK đầy đủ để `./gradlew bootJar` biên dịch ra file jar.
+    - **Stage runtime:** chỉ copy jar sang một image JRE alpine gọn nhẹ — image cuối không chứa JDK, source, hay Gradle. Nhỏ hơn nhiều và ít bề mặt tấn công hơn.
+
+    Hai chi tiết đáng học: `--mount=type=cache,target=/root/.gradle` giữ lại thư viện đã tải giữa các lần build (rebuild không tải lại ~400MB), và stage runtime chạy dưới **user non-root** (`appuser`) — nguyên tắc bảo mật cơ bản khi đóng gói container.
+- type: code
+  filename: identity/Dockerfile
+  lang: dockerfile
+  content: |
+    # Stage 1: Build
+    FROM eclipse-temurin:21-jdk AS builder
+    WORKDIR /workspace
+
+    # Gradle wrapper
+    COPY gradlew ./
+    COPY gradle gradle/
+
+    # Root build config
+    COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+
+    # Build files của mọi subproject (cần để Gradle evaluate settings.gradle.kts)
+    COPY common/build.gradle.kts       common/build.gradle.kts
+    COPY gateway/build.gradle.kts      gateway/build.gradle.kts
+    COPY identity/build.gradle.kts     identity/build.gradle.kts
+    COPY market-feed/build.gradle.kts  market-feed/build.gradle.kts
+    COPY aggregation/build.gradle.kts  aggregation/build.gradle.kts
+    COPY rule-engine/build.gradle.kts  rule-engine/build.gradle.kts
+    COPY alert-delivery/build.gradle.kts alert-delivery/build.gradle.kts
+    COPY billing/build.gradle.kts      billing/build.gradle.kts
+
+    # Source code: chỉ common (dependency của identity) và identity
+    COPY common/src   common/src
+    COPY identity/src identity/src
+
+    RUN --mount=type=cache,target=/root/.gradle chmod +x gradlew && ./gradlew :identity:bootJar --no-daemon -x test
+
+    # Stage 2: Runtime
+    FROM eclipse-temurin:21-jre-alpine
+    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+    WORKDIR /app
+    COPY --from=builder /workspace/identity/build/libs/identity.jar app.jar
+    USER appuser
+    EXPOSE 8081
+    ENTRYPOINT ["java", "-Xmx256m", "-jar", "app.jar"]
+- type: callout
+  variant: tip
+  content: Vì sao Dockerfile copy build.gradle.kts của CẢ 8 module dù chỉ build identity? Vì Gradle phải *đọc được* settings.gradle.kts (khai đủ 8 module) mới đánh giá được project — nhưng chỉ copy `src` của common + identity, nên vẫn chỉ biên dịch đúng thứ cần. Đây là cách build một service trong mono-repo mà không kéo theo toàn bộ.
+- type: command
+  label: Build thử image identity
+  content: |
+    docker build -f identity/Dockerfile -t market-pulse-identity .
+    # => image nho (~200MB), chay duoc bang: docker run market-pulse-identity
+- type: command
+  label: Lưu mốc bước 2.5
+  content: |
+    git add identity/Dockerfile
+    git commit -m "[step-2.5] identity: Dockerfile multi-stage (cache mount Gradle) — chay trong profile core"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/b8c0a73

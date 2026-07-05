@@ -1,0 +1,180 @@
+id: gi-03
+title: 'identity: REST API công khai /api/v1/keys'
+order: 3
+est_minutes: 30
+commit_ref: 0a36cbf
+goal: 'Mở REST API để tenant tự quản lý key: tạo (POST), liệt kê (GET), thu hồi (DELETE) — kèm xử lý lỗi tập trung.'
+deliverable: KeyController (3 endpoint) + 5 DTO + GlobalExceptionHandler (404 KEY_NOT_FOUND, 400 validation).
+outcome_preview: 'Sau bước này, identity có API công khai đầy đủ để đời sống một API key: sinh ra, xem, thu hồi — với mã lỗi rõ ràng thay vì stacktrace.'
+blocks:
+- type: prose
+  content: 'Tầng ngoài cùng: **REST controller** phơi 3 endpoint dưới `/api/v1/keys`. Chú ý các endpoint đọc `X-Tenant-Id` từ **header** chứ không nhận trong body — vì header này do gateway gắn vào sau khi xác thực (bước 2.6). Controller ở đây tin tưởng header đó, còn việc xác thực là của gateway. Đây là *phân tách trách nhiệm* điển hình của kiến trúc có cổng vào.'
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/controller/KeyController.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.controller;
+
+    import com.marketpulse.identity.dto.CreateKeyRequest;
+    import com.marketpulse.identity.dto.CreateKeyResponse;
+    import com.marketpulse.identity.dto.KeySummaryResponse;
+    import com.marketpulse.identity.service.ApiKeyService;
+    import jakarta.validation.Valid;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.*;
+
+    import java.util.List;
+    import java.util.UUID;
+
+    @RestController
+    public class KeyController {
+
+        private final ApiKeyService apiKeyService;
+
+        public KeyController(ApiKeyService apiKeyService) {
+            this.apiKeyService = apiKeyService;
+        }
+
+        @PostMapping("/api/v1/keys")
+        public CreateKeyResponse createKey(
+                @RequestHeader("X-Tenant-Id") UUID tenantId,
+                @Valid @RequestBody CreateKeyRequest request
+        ) {
+            return apiKeyService.issue(tenantId, request.label());
+        }
+
+        @GetMapping("/api/v1/keys")
+        public List<KeySummaryResponse> listKeys(
+                @RequestHeader("X-Tenant-Id") UUID tenantId
+        ) {
+            return apiKeyService.listByTenant(tenantId);
+        }
+
+        @DeleteMapping("/api/v1/keys/{id}")
+        @ResponseStatus(HttpStatus.NO_CONTENT)
+        public void deleteKey(
+                @RequestHeader("X-Tenant-Id") UUID tenantId,
+                @PathVariable UUID id
+        ) {
+            apiKeyService.revoke(tenantId, id);
+        }
+    }
+- type: prose
+  content: 'Năm **DTO** (Data Transfer Object — bản ghi vào/ra API, tách khỏi entity DB). Dùng Java record cho gọn. `CreateKeyResponse` là DTO duy nhất chứa trường `key` (raw) — nó chỉ được trả một lần lúc tạo:'
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/dto/CreateKeyRequest.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.dto;
+
+    import jakarta.validation.constraints.Size;
+
+    public record CreateKeyRequest(
+            @Size(max = 100) String label
+    ) {}
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/dto/CreateKeyResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.dto;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    public record CreateKeyResponse(
+            UUID id,
+            String key,
+            String label,
+            OffsetDateTime createdAt
+    ) {}
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/dto/KeySummaryResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.dto;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    public record KeySummaryResponse(
+            UUID id,
+            String label,
+            OffsetDateTime createdAt,
+            OffsetDateTime lastUsedAt,
+            boolean revoked
+    ) {}
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/dto/InternalKeyResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.dto;
+
+    import java.util.UUID;
+
+    public record InternalKeyResponse(
+            UUID tenantId,
+            UUID planId,
+            String status
+    ) {}
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/dto/ErrorResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.dto;
+
+    public record ErrorResponse(String error) {}
+- type: prose
+  content: 'Cuối cùng là **xử lý lỗi tập trung**. Thay vì mỗi controller tự bắt exception, `@RestControllerAdvice` gom về một chỗ: key không thấy → 404 `KEY_NOT_FOUND`, body sai định dạng → 400. Client luôn nhận JSON lỗi gọn gàng thay vì stacktrace 500.'
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/exception/KeyNotFoundException.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.exception;
+
+    public class KeyNotFoundException extends RuntimeException {
+        public KeyNotFoundException(Object identifier) {
+            super("API key not found: " + identifier);
+        }
+    }
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/web/GlobalExceptionHandler.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.web;
+
+    import com.marketpulse.identity.dto.ErrorResponse;
+    import com.marketpulse.identity.exception.KeyNotFoundException;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.MethodArgumentNotValidException;
+    import org.springframework.web.bind.annotation.ExceptionHandler;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+    import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+    @RestControllerAdvice
+    public class GlobalExceptionHandler {
+
+        @ExceptionHandler(KeyNotFoundException.class)
+        @ResponseStatus(HttpStatus.NOT_FOUND)
+        public ErrorResponse handleKeyNotFound(KeyNotFoundException e) {
+            return new ErrorResponse("KEY_NOT_FOUND");
+        }
+
+        @ExceptionHandler(MethodArgumentNotValidException.class)
+        @ResponseStatus(HttpStatus.BAD_REQUEST)
+        public ErrorResponse handleValidation(MethodArgumentNotValidException e) {
+            String message = e.getBindingResult().getFieldErrors().stream()
+                    .map(fe -> fe.getField() + " " + fe.getDefaultMessage())
+                    .findFirst()
+                    .orElse("INVALID_REQUEST");
+            return new ErrorResponse(message);
+        }
+    }
+- type: command
+  label: Lưu mốc bước 2.3
+  content: |
+    git add identity
+    git commit -m "[step-2.3] identity: REST public /api/v1/keys (POST/GET/DELETE) + error handler"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.3)
+  url: https://github.com/KouTaru99/market-pulse/commit/0a36cbf

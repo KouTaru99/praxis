@@ -1,0 +1,5 @@
+id: gateway-identity
+order: 2
+title: Cổng vào & danh tính
+description: 'Service identity phát hành API key (băm SHA-256) và gateway đứng gác cổng xác thực mọi request. Milestone: profile core chạy được.'
+part: A · Nền móng

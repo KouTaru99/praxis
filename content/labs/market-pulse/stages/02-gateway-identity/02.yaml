@@ -1,0 +1,489 @@
+id: gi-02
+title: 'identity: entity, repository & ApiKeyService (SHA-256)'
+order: 2
+est_minutes: 45
+commit_ref: 4ec442e
+goal: 'Viết tầng nghiệp vụ của identity: 3 entity JPA, repository, và ApiKeyService phát hành/thu hồi key với băm SHA-256 — kèm unit test.'
+deliverable: ApiKey/Tenant/Plan entity + 3 repository + ApiKeyService (issue/revoke/list) + tiện ích Sha256 + 2 file unit test.
+outcome_preview: Sau bước này, logic sinh key (băm rồi mới lưu), thu hồi và liệt kê đã có và được kiểm chứng bằng unit test — trái tim của service danh tính.
+blocks:
+- type: prose
+  content: 'Giờ tới tầng Java. Ba **entity** ánh xạ 3 bảng vừa tạo. Điểm đáng chú ý ở `ApiKey`: nó KHÔNG có setter cho `keyHash` — key sinh một lần rồi bất biến; chỉ có method nghiệp vụ `revoke()` đổi trạng thái. Đây là cách bảo vệ dữ liệu khỏi bị sửa bừa (encapsulation).'
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/domain/ApiKey.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.domain;
+
+    import jakarta.persistence.*;
+    import org.hibernate.annotations.CreationTimestamp;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    @Entity
+    @Table(name = "api_keys")
+    public class ApiKey {
+
+        @Id
+        @GeneratedValue(strategy = GenerationType.UUID)
+        private UUID id;
+
+        @ManyToOne(fetch = FetchType.LAZY)
+        @JoinColumn(name = "tenant_id", nullable = false)
+        private Tenant tenant;
+
+        @Column(name = "key_hash", nullable = false, unique = true, length = 64)
+        private String keyHash;
+
+        @Column(length = 100)
+        private String label;
+
+        @CreationTimestamp
+        @Column(name = "created_at", nullable = false, updatable = false)
+        private OffsetDateTime createdAt;
+
+        @Column(name = "revoked_at")
+        private OffsetDateTime revokedAt;
+
+        @Column(name = "last_used_at")
+        private OffsetDateTime lastUsedAt;
+
+        protected ApiKey() {}
+
+        public ApiKey(Tenant tenant, String keyHash, String label) {
+            this.tenant = tenant;
+            this.keyHash = keyHash;
+            this.label = label;
+        }
+
+        public void revoke() {
+            this.revokedAt = OffsetDateTime.now();
+        }
+
+        public void markUsed() {
+            this.lastUsedAt = OffsetDateTime.now();
+        }
+
+        public UUID getId() { return id; }
+        public Tenant getTenant() { return tenant; }
+        public String getKeyHash() { return keyHash; }
+        public String getLabel() { return label; }
+        public OffsetDateTime getCreatedAt() { return createdAt; }
+        public OffsetDateTime getRevokedAt() { return revokedAt; }
+        public OffsetDateTime getLastUsedAt() { return lastUsedAt; }
+    }
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/domain/Tenant.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.domain;
+
+    import jakarta.persistence.*;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    @Entity
+    @Table(name = "tenants")
+    public class Tenant {
+
+        @Id
+        private UUID id;
+
+        @Column(nullable = false, length = 100)
+        private String name;
+
+        @ManyToOne(fetch = FetchType.LAZY)
+        @JoinColumn(name = "plan_id", nullable = false)
+        private Plan plan;
+
+        @Column(nullable = false, length = 20)
+        private String status;
+
+        @Column(name = "created_at", nullable = false, updatable = false)
+        private OffsetDateTime createdAt;
+
+        protected Tenant() {}
+
+        public UUID getId() { return id; }
+        public String getName() { return name; }
+        public Plan getPlan() { return plan; }
+        public String getStatus() { return status; }
+        public OffsetDateTime getCreatedAt() { return createdAt; }
+    }
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/domain/Plan.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.domain;
+
+    import jakarta.persistence.Column;
+    import jakarta.persistence.Entity;
+    import jakarta.persistence.Id;
+    import jakarta.persistence.Table;
+
+    import java.util.UUID;
+
+    @Entity
+    @Table(name = "plans")
+    public class Plan {
+
+        @Id
+        private UUID id;
+
+        @Column(nullable = false, length = 50)
+        private String name;
+
+        @Column(name = "max_rules", nullable = false)
+        private int maxRules;
+
+        @Column(name = "max_alerts_pm", nullable = false)
+        private int maxAlertsPm;
+
+        protected Plan() {}
+
+        public UUID getId() { return id; }
+        public String getName() { return name; }
+        public int getMaxRules() { return maxRules; }
+        public int getMaxAlertsPm() { return maxAlertsPm; }
+    }
+- type: prose
+  content: Ba **repository** (Spring Data JPA — tự sinh câu SQL từ tên method). Đáng chú ý `findActiveByKeyHash` dùng `JOIN FETCH` để lấy luôn tenant + plan trong MỘT truy vấn — tránh bẫy *N+1 query* (lười nạp rồi query thêm từng dòng). Query này chính là cái gateway sẽ gọi.
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/repository/ApiKeyRepository.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.repository;
+
+    import com.marketpulse.identity.domain.ApiKey;
+    import org.springframework.data.jpa.repository.JpaRepository;
+    import org.springframework.data.jpa.repository.Modifying;
+    import org.springframework.data.jpa.repository.Query;
+    import org.springframework.data.repository.query.Param;
+    import org.springframework.transaction.annotation.Transactional;
+
+    import java.time.OffsetDateTime;
+    import java.util.List;
+    import java.util.Optional;
+    import java.util.UUID;
+
+    public interface ApiKeyRepository extends JpaRepository<ApiKey, UUID> {
+
+        List<ApiKey> findByTenant_Id(UUID tenantId);
+
+        Optional<ApiKey> findByIdAndTenant_Id(UUID id, UUID tenantId);
+
+        // Fetch tenant + plan trong cùng 1 query — dùng cho internal endpoint
+        @Query("""
+                SELECT k FROM ApiKey k
+                JOIN FETCH k.tenant t
+                JOIN FETCH t.plan
+                WHERE k.keyHash = :keyHash AND k.revokedAt IS NULL
+                """)
+        Optional<ApiKey> findActiveByKeyHash(@Param("keyHash") String keyHash);
+
+        @Transactional
+        @Modifying
+        @Query("UPDATE ApiKey k SET k.lastUsedAt = :now WHERE k.id = :id")
+        void updateLastUsedAt(@Param("id") UUID id, @Param("now") OffsetDateTime now);
+    }
+- type: prose
+  content: 'Tiện ích băm — biến chuỗi thành 64 ký tự hex SHA-256:'
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/util/Sha256.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.util;
+
+    import java.nio.charset.StandardCharsets;
+    import java.security.MessageDigest;
+    import java.security.NoSuchAlgorithmException;
+
+    public final class Sha256 {
+
+        private Sha256() {}
+
+        public static String hex(String input) {
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
+                StringBuilder sb = new StringBuilder(64);
+                for (byte b : hash) {
+                    sb.append(String.format("%02x", b));
+                }
+                return sb.toString();
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("SHA-256 unavailable", e);
+            }
+        }
+    }
+- type: prose
+  content: Và **ApiKeyService** — trái tim nghiệp vụ. `issue()` sinh key ngẫu nhiên bằng `SecureRandom` (đủ 128-bit entropy), băm SHA-256, rồi **chỉ lưu hash**; raw key được trả về đúng một lần cho người gọi. `revoke()` không xoá dòng mà đánh dấu `revoked_at` (giữ lịch sử). `updateLastUsedAtAsync` chạy nền để không làm chậm response.
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/service/ApiKeyService.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.service;
+
+    import com.marketpulse.identity.domain.ApiKey;
+    import com.marketpulse.identity.domain.Tenant;
+    import com.marketpulse.identity.dto.CreateKeyResponse;
+    import com.marketpulse.identity.dto.KeySummaryResponse;
+    import com.marketpulse.identity.exception.KeyNotFoundException;
+    import com.marketpulse.identity.repository.ApiKeyRepository;
+    import com.marketpulse.identity.repository.TenantRepository;
+    import com.marketpulse.identity.util.Sha256;
+    import org.springframework.scheduling.annotation.Async;
+    import org.springframework.stereotype.Service;
+    import org.springframework.transaction.annotation.Transactional;
+
+    import java.security.SecureRandom;
+    import java.time.OffsetDateTime;
+    import java.util.HexFormat;
+    import java.util.List;
+    import java.util.UUID;
+
+    @Service
+    public class ApiKeyService {
+
+        private final ApiKeyRepository apiKeyRepository;
+        private final TenantRepository tenantRepository;
+
+        public ApiKeyService(ApiKeyRepository apiKeyRepository, TenantRepository tenantRepository) {
+            this.apiKeyRepository = apiKeyRepository;
+            this.tenantRepository = tenantRepository;
+        }
+
+        @Transactional
+        public CreateKeyResponse issue(UUID tenantId, String label) {
+            Tenant tenant = tenantRepository.findById(tenantId)
+                    .orElseThrow(() -> new IllegalStateException("Tenant not found: " + tenantId));
+
+            // "mp_" + 32 hex chars = 35 ký tự, đủ entropy (128 bit)
+            byte[] bytes = new byte[16];
+            new SecureRandom().nextBytes(bytes);
+            String rawKey = "mp_" + HexFormat.of().formatHex(bytes);
+            String keyHash = Sha256.hex(rawKey);
+
+            ApiKey saved = apiKeyRepository.saveAndFlush(new ApiKey(tenant, keyHash, label));
+            return new CreateKeyResponse(saved.getId(), rawKey, saved.getLabel(), saved.getCreatedAt());
+        }
+
+        @Transactional(readOnly = true)
+        public List<KeySummaryResponse> listByTenant(UUID tenantId) {
+            return apiKeyRepository.findByTenant_Id(tenantId).stream()
+                    .map(k -> new KeySummaryResponse(
+                            k.getId(), k.getLabel(), k.getCreatedAt(),
+                            k.getLastUsedAt(), k.getRevokedAt() != null))
+                    .toList();
+        }
+
+        @Transactional
+        public void revoke(UUID tenantId, UUID keyId) {
+            ApiKey key = apiKeyRepository.findByIdAndTenant_Id(keyId, tenantId)
+                    .orElseThrow(() -> new KeyNotFoundException(keyId));
+            // đã revoke → coi như không tồn tại
+            if (key.getRevokedAt() != null) {
+                throw new KeyNotFoundException(keyId);
+            }
+            key.revoke(); // dirty-checking flush khi transaction commit
+        }
+
+        // Chạy async trong thread riêng — không block response của internal endpoint
+        @Async
+        @Transactional
+        public void updateLastUsedAtAsync(UUID keyId) {
+            apiKeyRepository.updateLastUsedAt(keyId, OffsetDateTime.now());
+        }
+    }
+- type: callout
+  variant: warning
+  content: '`saveAndFlush` (không phải `save`) là chủ đích: `@CreationTimestamp` chỉ được điền lúc Hibernate *flush* xuống DB. Nếu dùng `save` thường, `createdAt` trong response tạo key sẽ là null cho tới khi transaction commit — một bẫy đã dính khi verify container thật ở phiên code.'
+- type: prose
+  content: 'Tầng nghiệp vụ quan trọng thì phải có **unit test** (kiểm thử từng đơn vị logic, mock database). Hai file test dưới xác nhận: băm đúng, sinh key có prefix `mp_`, revoke key đã revoke thì báo lỗi...'
+- type: code
+  filename: identity/src/test/java/com/marketpulse/identity/service/ApiKeyServiceTest.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.service;
+
+    import com.marketpulse.identity.domain.ApiKey;
+    import com.marketpulse.identity.domain.Tenant;
+    import com.marketpulse.identity.dto.CreateKeyResponse;
+    import com.marketpulse.identity.dto.KeySummaryResponse;
+    import com.marketpulse.identity.exception.KeyNotFoundException;
+    import com.marketpulse.identity.repository.ApiKeyRepository;
+    import com.marketpulse.identity.repository.TenantRepository;
+    import org.junit.jupiter.api.Test;
+    import org.junit.jupiter.api.extension.ExtendWith;
+    import org.mockito.InjectMocks;
+    import org.mockito.Mock;
+    import org.mockito.junit.jupiter.MockitoExtension;
+
+    import java.util.List;
+    import java.util.Optional;
+    import java.util.UUID;
+
+    import static org.assertj.core.api.Assertions.assertThat;
+    import static org.assertj.core.api.Assertions.assertThatThrownBy;
+    import static org.mockito.ArgumentMatchers.any;
+    import static org.mockito.Mockito.*;
+
+    @ExtendWith(MockitoExtension.class)
+    class ApiKeyServiceTest {
+
+        @Mock
+        private ApiKeyRepository apiKeyRepository;
+
+        @Mock
+        private TenantRepository tenantRepository;
+
+        @InjectMocks
+        private ApiKeyService apiKeyService;
+
+        @Test
+        void issue_existingTenant_returnsRawKeyWithPrefix() {
+            UUID tenantId = UUID.randomUUID();
+            Tenant mockTenant = mock(Tenant.class);
+
+            when(tenantRepository.findById(tenantId)).thenReturn(Optional.of(mockTenant));
+            when(apiKeyRepository.saveAndFlush(any(ApiKey.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            CreateKeyResponse response = apiKeyService.issue(tenantId, "production");
+
+            assertThat(response.key()).startsWith("mp_");
+            assertThat(response.key()).hasSize(35); // "mp_" + 32 hex chars
+            assertThat(response.label()).isEqualTo("production");
+            verify(apiKeyRepository).saveAndFlush(any(ApiKey.class));
+        }
+
+        @Test
+        void issue_twoCallsSameTenant_generateDistinctRawKeys() {
+            UUID tenantId = UUID.randomUUID();
+            Tenant mockTenant = mock(Tenant.class);
+
+            when(tenantRepository.findById(tenantId)).thenReturn(Optional.of(mockTenant));
+            when(apiKeyRepository.saveAndFlush(any(ApiKey.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            String key1 = apiKeyService.issue(tenantId, "a").key();
+            String key2 = apiKeyService.issue(tenantId, "b").key();
+
+            assertThat(key1).isNotEqualTo(key2);
+        }
+
+        @Test
+        void issue_unknownTenant_throwsIllegalState() {
+            UUID tenantId = UUID.randomUUID();
+            when(tenantRepository.findById(tenantId)).thenReturn(Optional.empty());
+
+            assertThatThrownBy(() -> apiKeyService.issue(tenantId, "x"))
+                    .isInstanceOf(IllegalStateException.class);
+        }
+
+        @Test
+        void revoke_activeKey_marksRevoked() {
+            UUID tenantId = UUID.randomUUID();
+            UUID keyId = UUID.randomUUID();
+            Tenant mockTenant = mock(Tenant.class);
+            ApiKey key = new ApiKey(mockTenant, "somehash", "label");
+
+            when(apiKeyRepository.findByIdAndTenant_Id(keyId, tenantId))
+                    .thenReturn(Optional.of(key));
+
+            apiKeyService.revoke(tenantId, keyId);
+
+            assertThat(key.getRevokedAt()).isNotNull();
+        }
+
+        @Test
+        void revoke_alreadyRevokedKey_throwsKeyNotFound() {
+            UUID tenantId = UUID.randomUUID();
+            UUID keyId = UUID.randomUUID();
+            Tenant mockTenant = mock(Tenant.class);
+            ApiKey key = new ApiKey(mockTenant, "somehash", "label");
+            key.revoke(); // đã revoke trước đó
+
+            when(apiKeyRepository.findByIdAndTenant_Id(keyId, tenantId))
+                    .thenReturn(Optional.of(key));
+
+            assertThatThrownBy(() -> apiKeyService.revoke(tenantId, keyId))
+                    .isInstanceOf(KeyNotFoundException.class);
+        }
+
+        @Test
+        void revoke_keyNotBelongToTenant_throwsKeyNotFound() {
+            UUID tenantId = UUID.randomUUID();
+            UUID keyId = UUID.randomUUID();
+            when(apiKeyRepository.findByIdAndTenant_Id(keyId, tenantId))
+                    .thenReturn(Optional.empty());
+
+            assertThatThrownBy(() -> apiKeyService.revoke(tenantId, keyId))
+                    .isInstanceOf(KeyNotFoundException.class);
+        }
+
+        @Test
+        void listByTenant_mixedKeys_mapsRevokedFlagCorrectly() {
+            UUID tenantId = UUID.randomUUID();
+            Tenant mockTenant = mock(Tenant.class);
+
+            ApiKey active = new ApiKey(mockTenant, "hash1", "active-key");
+            ApiKey revoked = new ApiKey(mockTenant, "hash2", "revoked-key");
+            revoked.revoke();
+
+            when(apiKeyRepository.findByTenant_Id(tenantId)).thenReturn(List.of(active, revoked));
+
+            List<KeySummaryResponse> result = apiKeyService.listByTenant(tenantId);
+
+            assertThat(result).hasSize(2);
+            assertThat(result.get(0).revoked()).isFalse();
+            assertThat(result.get(1).revoked()).isTrue();
+        }
+    }
+- type: code
+  filename: identity/src/test/java/com/marketpulse/identity/util/Sha256Test.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.util;
+
+    import org.junit.jupiter.api.Test;
+
+    import static org.assertj.core.api.Assertions.assertThat;
+
+    class Sha256Test {
+
+        // echo -n "demo-key-acme-2026" | sha256sum
+        private static final String KNOWN_HASH =
+                "c353b1e8e03220dea4afd70dc01590685b711e4aab502b61a9c9d277cd459826";
+
+        @Test
+        void hex_knownInput_matchesSeedHash() {
+            assertThat(Sha256.hex("demo-key-acme-2026")).isEqualTo(KNOWN_HASH);
+        }
+
+        @Test
+        void hex_sameInput_isDeterministic() {
+            String h1 = Sha256.hex("any-string");
+            String h2 = Sha256.hex("any-string");
+            assertThat(h1).isEqualTo(h2).hasSize(64);
+        }
+
+        @Test
+        void hex_differentInputs_produceDifferentHashes() {
+            assertThat(Sha256.hex("key-a")).isNotEqualTo(Sha256.hex("key-b"));
+        }
+    }
+- type: command
+  label: Chạy unit test identity
+  content: |
+    ./gradlew :identity:test
+    # BUILD SUCCESSFUL — 7 test pass
+- type: command
+  label: Lưu mốc bước 2.2
+  content: |
+    git add identity
+    git commit -m "[step-2.2] identity: entity + ApiKeyService (issue/revoke SHA-256) + unit tests"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-2.2)
+  url: https://github.com/KouTaru99/market-pulse/commit/4ec442e
