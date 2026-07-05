@@ -2,3 +2,4 @@ id: deploy
 order: 6
 title: Đóng gói & Deploy
 description: Đóng gói Docker và chạy production-like ở local ($0).
+part: C · Hoàn thiện & vận hành

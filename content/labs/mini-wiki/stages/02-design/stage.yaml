@@ -2,3 +2,4 @@ id: design
 order: 2
 title: Thiết kế & ADR
 description: Chốt cấu trúc dữ liệu, hợp đồng API và các quyết định kỹ thuật.
+part: A · Định hình

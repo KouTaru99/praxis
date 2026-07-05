@@ -34,6 +34,7 @@ export interface Stage {
   id: string;
   order: number;
   title: string;
+  part?: string; // nhóm hiển thị (Phần) cho lab dài — không đổi URL
   description?: string;
   steps: Step[];
 }
