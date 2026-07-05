@@ -1,0 +1,379 @@
+id: yc-06
+title: 'infra/: khung docker-compose + 5 profile'
+order: 6
+est_minutes: 30
+commit_ref: bcbcf19
+goal: 'Dựng khung hạ tầng local: RabbitMQ + 5 PostgreSQL (db-per-service) + mailhog, chia 5 compose profile để chạy hệ TỪNG PHẦN.'
+deliverable: 'infra/docker-compose.yml (5 profile: core, feed, processing, delivery, full) + infra/.env.example.'
+outcome_preview: Sau bước này docker compose config -q xác nhận cú pháp sạch — bộ khung hạ tầng đã sẵn, các chặng sau chỉ việc cắm service vào đúng profile.
+blocks:
+- type: prose
+  content: |
+    Hệ 7 service + 5 database + 1 message queue mà bắt "dựng đủ mới thấy kết quả" thì người học nản ngay. Vì vậy ràng buộc thiết kế được khắc từ đầu: **compose profile** — mỗi milestone bật đúng nhóm container của nó:
+
+    - **core** — gateway + identity (+ db): xong Chặng 2 là chạy được.
+    - **feed** — market-feed + RabbitMQ: xong Chặng 3 thấy trade thật chảy vào queue.
+    - **processing** — aggregation + rule-engine (+ db): Chặng 4–5.
+    - **delivery** — alert-delivery + billing (+ db + mailhog): Chặng 6–7.
+    - **full** — cả hệ: Chặng 10.
+
+    Mỗi service một database PostgreSQL riêng (**db-per-service** — service khác muốn dữ liệu phải hỏi qua API/sự kiện, không được mò vào db của nhau). Mailhog là SMTP giả để test gửi email không cần tài khoản mail thật.
+- type: prose
+  content: 'Trước tiên là file mẫu biến môi trường. Quy ước như mọi dự án thật: commit file `.env.example` (giá trị giả), còn `.env` thật thì `.gitignore` đã chặn từ bước 1.1.'
+- type: code
+  filename: infra/.env.example
+  lang: bash
+  content: |
+    # Sao chép file này thành infra/.env và điền giá trị thật.
+    # infra/.env đã được thêm vào .gitignore — KHÔNG commit file .env thật.
+
+    # PostgreSQL — identity service
+    IDENTITY_DB_USER=identity_user
+    IDENTITY_DB_PASSWORD=change_me
+
+    # PostgreSQL — aggregation service
+    AGGREGATION_DB_USER=aggregation_user
+    AGGREGATION_DB_PASSWORD=change_me
+
+    # PostgreSQL — rule-engine service
+    RULE_ENGINE_DB_USER=rule_engine_user
+    RULE_ENGINE_DB_PASSWORD=change_me
+
+    # PostgreSQL — alert-delivery service
+    ALERT_DELIVERY_DB_USER=alert_delivery_user
+    ALERT_DELIVERY_DB_PASSWORD=change_me
+
+    # PostgreSQL — billing service
+    BILLING_DB_USER=billing_user
+    BILLING_DB_PASSWORD=change_me
+
+    # RabbitMQ
+    RABBITMQ_USER=market_pulse
+    RABBITMQ_PASSWORD=change_me
+
+    # market-feed mode: live | record | replay
+    FEED_MODE=live
+    FEED_SYMBOLS=BTCUSDT
+    # REPLAY_FILE=/data/trades-BTCUSDT-2026-07-04.ndjson
+    REPLAY_MULTIPLIER=1
+    REPLAY_LOOP=false
+- type: code
+  filename: infra/docker-compose.yml
+  lang: yaml
+  content: |
+    services:
+
+      # ─────────────────────────────────────────────
+      # Profile: core — gateway + identity + identity-db
+      # ─────────────────────────────────────────────
+
+      identity-db:
+        image: postgres:16
+        profiles: [core, full]
+        environment:
+          POSTGRES_DB: identity
+          POSTGRES_USER: ${IDENTITY_DB_USER}
+          POSTGRES_PASSWORD: ${IDENTITY_DB_PASSWORD}
+        ports:
+          - "5432:5432"
+        volumes:
+          - identity-db-data:/var/lib/postgresql/data
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U ${IDENTITY_DB_USER} -d identity"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+      identity:
+        build:
+          context: ..
+          dockerfile: identity/Dockerfile
+        profiles: [core, full]
+        ports:
+          - "8081:8081"
+        environment:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://identity-db:5432/identity
+          SPRING_DATASOURCE_USERNAME: ${IDENTITY_DB_USER}
+          SPRING_DATASOURCE_PASSWORD: ${IDENTITY_DB_PASSWORD}
+        depends_on:
+          identity-db:
+            condition: service_healthy
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf http://localhost:8081/actuator/health || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 5
+
+      gateway:
+        build:
+          context: ..
+          dockerfile: gateway/Dockerfile
+        profiles: [core, full]
+        ports:
+          - "8080:8080"
+        environment:
+          IDENTITY_SERVICE_URL: http://identity:8081
+        depends_on:
+          identity:
+            condition: service_healthy
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 5
+
+      # ─────────────────────────────────────────────
+      # Profile: feed — market-feed + rabbitmq
+      # ─────────────────────────────────────────────
+
+      rabbitmq:
+        image: rabbitmq:3.13-management
+        profiles: [feed, processing, delivery, full]
+        ports:
+          - "5672:5672"
+          - "15672:15672"
+        environment:
+          RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+          RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+        volumes:
+          - rabbitmq-data:/var/lib/rabbitmq
+        healthcheck:
+          test: ["CMD", "rabbitmq-diagnostics", "ping"]
+          interval: 15s
+          timeout: 10s
+          retries: 6
+
+      market-feed:
+        build:
+          context: ..
+          dockerfile: market-feed/Dockerfile
+        profiles: [feed, full]
+        ports:
+          - "8082:8082"
+        environment:
+          SPRING_RABBITMQ_HOST: rabbitmq
+          SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER}
+          SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+          FEED_MODE: ${FEED_MODE:-live}
+          FEED_SYMBOLS: ${FEED_SYMBOLS:-BTCUSDT}
+          REPLAY_FILE: ${REPLAY_FILE:-}
+          REPLAY_MULTIPLIER: ${REPLAY_MULTIPLIER:-1}
+          REPLAY_LOOP: ${REPLAY_LOOP:-false}
+        depends_on:
+          rabbitmq:
+            condition: service_healthy
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf http://localhost:8082/actuator/health || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 5
+
+      # ─────────────────────────────────────────────
+      # Profile: processing — aggregation + rule-engine + DBs
+      # ─────────────────────────────────────────────
+
+      aggregation-db:
+        image: postgres:16
+        profiles: [processing, full]
+        environment:
+          POSTGRES_DB: aggregation
+          POSTGRES_USER: ${AGGREGATION_DB_USER}
+          POSTGRES_PASSWORD: ${AGGREGATION_DB_PASSWORD}
+        ports:
+          - "5433:5432"
+        volumes:
+          - aggregation-db-data:/var/lib/postgresql/data
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U ${AGGREGATION_DB_USER} -d aggregation"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+      aggregation:
+        build:
+          context: ..
+          dockerfile: aggregation/Dockerfile
+        profiles: [processing, full]
+        ports:
+          - "8086:8086"
+        environment:
+          SPRING_RABBITMQ_HOST: rabbitmq
+          SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER}
+          SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+          SPRING_DATASOURCE_URL: jdbc:postgresql://aggregation-db:5432/aggregation
+          SPRING_DATASOURCE_USERNAME: ${AGGREGATION_DB_USER}
+          SPRING_DATASOURCE_PASSWORD: ${AGGREGATION_DB_PASSWORD}
+        depends_on:
+          rabbitmq:
+            condition: service_healthy
+          aggregation-db:
+            condition: service_healthy
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf http://localhost:8086/actuator/health || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 5
+
+      rule-engine-db:
+        image: postgres:16
+        profiles: [processing, full]
+        environment:
+          POSTGRES_DB: rule_engine
+          POSTGRES_USER: ${RULE_ENGINE_DB_USER}
+          POSTGRES_PASSWORD: ${RULE_ENGINE_DB_PASSWORD}
+        ports:
+          - "5434:5432"
+        volumes:
+          - rule-engine-db-data:/var/lib/postgresql/data
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U ${RULE_ENGINE_DB_USER} -d rule_engine"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+      rule-engine:
+        build:
+          context: ..
+          dockerfile: rule-engine/Dockerfile
+        profiles: [processing, full]
+        ports:
+          - "8083:8083"
+        environment:
+          SPRING_RABBITMQ_HOST: rabbitmq
+          SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER}
+          SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+          SPRING_DATASOURCE_URL: jdbc:postgresql://rule-engine-db:5432/rule_engine
+          SPRING_DATASOURCE_USERNAME: ${RULE_ENGINE_DB_USER}
+          SPRING_DATASOURCE_PASSWORD: ${RULE_ENGINE_DB_PASSWORD}
+          BILLING_SERVICE_URL: http://billing:8085
+        depends_on:
+          rabbitmq:
+            condition: service_healthy
+          rule-engine-db:
+            condition: service_healthy
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf http://localhost:8083/actuator/health || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 5
+
+      # ─────────────────────────────────────────────
+      # Profile: delivery — alert-delivery + billing + DBs + mailhog
+      # ─────────────────────────────────────────────
+
+      alert-delivery-db:
+        image: postgres:16
+        profiles: [delivery, full]
+        environment:
+          POSTGRES_DB: alert_delivery
+          POSTGRES_USER: ${ALERT_DELIVERY_DB_USER}
+          POSTGRES_PASSWORD: ${ALERT_DELIVERY_DB_PASSWORD}
+        ports:
+          - "5435:5432"
+        volumes:
+          - alert-delivery-db-data:/var/lib/postgresql/data
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U ${ALERT_DELIVERY_DB_USER} -d alert_delivery"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+      alert-delivery:
+        build:
+          context: ..
+          dockerfile: alert-delivery/Dockerfile
+        profiles: [delivery, full]
+        ports:
+          - "8084:8084"
+        environment:
+          SPRING_RABBITMQ_HOST: rabbitmq
+          SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER}
+          SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+          SPRING_DATASOURCE_URL: jdbc:postgresql://alert-delivery-db:5432/alert_delivery
+          SPRING_DATASOURCE_USERNAME: ${ALERT_DELIVERY_DB_USER}
+          SPRING_DATASOURCE_PASSWORD: ${ALERT_DELIVERY_DB_PASSWORD}
+        depends_on:
+          rabbitmq:
+            condition: service_healthy
+          alert-delivery-db:
+            condition: service_healthy
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf http://localhost:8084/actuator/health || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 5
+
+      billing-db:
+        image: postgres:16
+        profiles: [delivery, full]
+        environment:
+          POSTGRES_DB: billing
+          POSTGRES_USER: ${BILLING_DB_USER}
+          POSTGRES_PASSWORD: ${BILLING_DB_PASSWORD}
+        ports:
+          - "5436:5432"
+        volumes:
+          - billing-db-data:/var/lib/postgresql/data
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U ${BILLING_DB_USER} -d billing"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+      billing:
+        build:
+          context: ..
+          dockerfile: billing/Dockerfile
+        profiles: [delivery, full]
+        ports:
+          - "8085:8085"
+        environment:
+          SPRING_RABBITMQ_HOST: rabbitmq
+          SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER}
+          SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+          SPRING_DATASOURCE_URL: jdbc:postgresql://billing-db:5432/billing
+          SPRING_DATASOURCE_USERNAME: ${BILLING_DB_USER}
+          SPRING_DATASOURCE_PASSWORD: ${BILLING_DB_PASSWORD}
+        depends_on:
+          rabbitmq:
+            condition: service_healthy
+          billing-db:
+            condition: service_healthy
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf http://localhost:8085/actuator/health || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 5
+
+      mailhog:
+        image: mailhog/mailhog:latest
+        profiles: [delivery, full]
+        ports:
+          - "1025:1025"   # SMTP
+          - "8025:8025"   # Web UI
+
+    volumes:
+      identity-db-data:
+      aggregation-db-data:
+      rule-engine-db-data:
+      alert-delivery-db-data:
+      billing-db-data:
+      rabbitmq-data:
+- type: command
+  label: Tạo .env thật + kiểm tra cú pháp compose
+  content: |
+    cp infra/.env.example infra/.env
+    docker compose -f infra/docker-compose.yml --env-file infra/.env config -q
+    # Khong in gi = cu phap sach
+- type: callout
+  variant: warning
+  content: 'Bước này mới verify được CÚ PHÁP compose — chưa up được container nào, vì Dockerfile của từng service nằm ở các chặng sau. Đây là chủ đích: khung hạ tầng đi trước, service "cắm" vào dần theo từng milestone.'
+- type: command
+  label: Lưu mốc bước 1.6
+  content: |
+    git add infra
+    git commit -m "[step-1.6] infra/: docker-compose khung (RabbitMQ + 5 PG + mailhog, 5 profiles) + .env.example"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-1.6)
+  url: https://github.com/KouTaru99/market-pulse/commit/bcbcf19

@@ -1,0 +1,14 @@
+id: market-pulse
+title: Xây dựng Market Pulse
+category: dev
+complexity: nang-cao
+est_hours: 32
+description: Nền tảng B2B cảnh báo thị trường real-time trên dữ liệu Binance thật — 7 microservice Spring Boot + RabbitMQ, dựng và chạy được từng phần. Lab dài 10 chặng, nội dung phát hành dần theo từng milestone.
+repo_solution: https://github.com/KouTaru99/market-pulse
+tags:
+- java
+- spring-boot
+- microservices
+- rabbitmq
+- postgresql
+- docker

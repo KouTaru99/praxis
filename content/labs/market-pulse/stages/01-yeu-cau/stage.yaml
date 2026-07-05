@@ -1,0 +1,5 @@
+id: yeu-cau
+order: 1
+title: Ý tưởng & Yêu cầu
+description: Đặc tả yêu cầu, 4 ADR, khung Gradle mono-repo, hợp đồng sự kiện và bộ khung 7 service.
+part: A · Nền móng

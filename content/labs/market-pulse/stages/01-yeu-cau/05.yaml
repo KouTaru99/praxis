@@ -1,0 +1,380 @@
+id: yc-05
+title: Skeleton 7 service Spring Boot
+order: 5
+est_minutes: 45
+commit_ref: cf38bb8
+goal: 'Dựng bộ khung tối thiểu cho cả 7 service: main class + application.yml (port riêng + actuator health).'
+deliverable: '7 module service compile được, mỗi service 3 file: build.gradle.kts, Application.java, application.yml.'
+outcome_preview: Sau bước này ./gradlew build là BUILD SUCCESSFUL cho cả 8 module — mỗi service đã là một app Spring Boot chạy được, có health endpoint riêng.
+blocks:
+- type: prose
+  content: |
+    Mỗi service lúc này chỉ cần là một app Spring Boot **tối thiểu**: 1 main class, 1 file cấu hình khai port + bật actuator (bộ endpoint quản trị của Boot — ta cần `/actuator/health` để Docker healthcheck ở các chặng sau). Bảng port đã chốt trong README:
+
+    - gateway 8080 · identity 8081 · market-feed 8082 · rule-engine 8083 · alert-delivery 8084 · billing 8085 · aggregation 8086
+
+    Điểm khác biệt duy nhất: **gateway** dùng Spring Cloud Gateway — chạy trên WebFlux (mô hình non-blocking, không chặn luồng khi chờ I/O), nên dependency của nó khác 6 service còn lại (không có starter-web). Sáu service kia dùng chung một khuôn: starter-web + actuator + common.
+
+    Tạo lần lượt 21 file dưới đây — dài nhưng lặp khuôn, copy tới đâu hình dung hệ tới đó:
+- type: code
+  filename: gateway/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.cloud:spring-cloud-starter-gateway")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        // Caffeine cache — dùng cho API key lookup
+        implementation("com.github.ben-manes.caffeine:caffeine")
+        // gateway không cần common (không publish/consume event)
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: gateway/src/main/java/com/marketpulse/gateway/GatewayApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.gateway;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class GatewayApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(GatewayApplication.class, args);
+        }
+    }
+- type: code
+  filename: gateway/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8080
+
+    spring:
+      application:
+        name: gateway
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: code
+  filename: identity/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/IdentityApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.identity;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class IdentityApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(IdentityApplication.class, args);
+        }
+    }
+- type: code
+  filename: identity/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8081
+
+    spring:
+      application:
+        name: identity
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: code
+  filename: market-feed/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/MarketFeedApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.marketfeed;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class MarketFeedApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(MarketFeedApplication.class, args);
+        }
+    }
+- type: code
+  filename: market-feed/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8082
+
+    spring:
+      application:
+        name: market-feed
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: code
+  filename: aggregation/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/AggregationApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.aggregation;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class AggregationApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(AggregationApplication.class, args);
+        }
+    }
+- type: code
+  filename: aggregation/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8086
+
+    spring:
+      application:
+        name: aggregation
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: code
+  filename: rule-engine/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/RuleEngineApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.ruleengine;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class RuleEngineApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(RuleEngineApplication.class, args);
+        }
+    }
+- type: code
+  filename: rule-engine/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8083
+
+    spring:
+      application:
+        name: rule-engine
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: code
+  filename: alert-delivery/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/AlertDeliveryApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class AlertDeliveryApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(AlertDeliveryApplication.class, args);
+        }
+    }
+- type: code
+  filename: alert-delivery/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8084
+
+    spring:
+      application:
+        name: alert-delivery
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: code
+  filename: billing/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/BillingApplication.java
+  lang: java
+  content: |
+    package com.marketpulse.billing;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class BillingApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(BillingApplication.class, args);
+        }
+    }
+- type: code
+  filename: billing/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8085
+
+    spring:
+      application:
+        name: billing
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: command
+  label: Build cả hệ lần đầu
+  content: |
+    ./gradlew build
+    # BUILD SUCCESSFUL — 8 module compile + dong jar
+- type: callout
+  variant: warning
+  content: Nếu build fail kiểu "project ':common' not found" — kiểm tra lại tên module trong settings.gradle.kts khớp đúng tên thư mục; còn lỗi thiếu class sự kiện thì xem lại từng build.gradle.kts của service đã có dòng implementation(project(":common")) chưa.
+- type: command
+  label: Lưu mốc bước 1.5
+  content: |
+    git add gateway identity market-feed aggregation rule-engine alert-delivery billing
+    git commit -m "[step-1.5] Skeleton 7 service Spring Boot: port 8080-8086, actuator, gateway Spring Cloud"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-1.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/cf38bb8

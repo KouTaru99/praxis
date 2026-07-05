@@ -1,0 +1,112 @@
+id: yc-03
+title: Khung Gradle mono-repo + toolchain Java 21
+order: 3
+est_minutes: 30
+commit_ref: '2828352'
+goal: 'Dựng khung Gradle multi-project: khai 8 module, áp chung Java 21 và BOM Spring Boot cho mọi module con.'
+deliverable: settings.gradle.kts (8 module) + build.gradle.kts gốc (toolchain 21 + BOM) + gradle.properties + Gradle wrapper.
+outcome_preview: Sau bước này, gõ ./gradlew projects sẽ liệt kê đủ 8 module — bộ khung xương của cả hệ đã đứng, dù chưa có dòng code nào.
+blocks:
+- type: prose
+  content: 'Theo ADR-002, cả hệ nằm trong một repo dạng **Gradle multi-project**: 1 module `common` chia sẻ + 7 module service. File `settings.gradle.kts` khai danh sách module; file `build.gradle.kts` ở gốc áp cấu hình chung cho TẤT CẢ module con — nhờ vậy 8 module không lặp lại nhau từng khối cấu hình.'
+- type: code
+  filename: settings.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
+    }
+
+    rootProject.name = "market-pulse"
+
+    include(
+        "common",
+        "gateway",
+        "identity",
+        "market-feed",
+        "aggregation",
+        "rule-engine",
+        "alert-delivery",
+        "billing"
+    )
+- type: prose
+  content: |
+    Hai điểm đáng chú ý trong build gốc:
+
+    - **Toolchain Java 21:** khai một lần ở gốc, Gradle tự lo đúng JDK cho mọi module. Plugin foojay-resolver (khai ở settings) còn tự TẢI JDK 21 nếu máy chưa có — người clone repo không phải cài tay.
+    - **BOM** (Bill of Materials — bảng khai phiên bản chuẩn) của Spring Boot 3.4.1 + Spring Cloud 2024.0.0: import ở gốc, để mọi module con khai dependency KHÔNG cần ghi số phiên bản — hết cảnh mỗi service một version lệch nhau.
+- type: code
+  filename: build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot") version "3.4.1" apply false
+        id("io.spring.dependency-management") version "1.1.7" apply false
+        java
+    }
+
+    group = "com.marketpulse"
+    version = "0.1.0-SNAPSHOT"
+
+    subprojects {
+        apply(plugin = "java")
+
+        java {
+            toolchain {
+                languageVersion = JavaLanguageVersion.of(21)
+            }
+        }
+
+        repositories {
+            mavenCentral()
+        }
+
+        // Spring Boot BOM — áp cho mọi subproject kể cả common
+        apply(plugin = "io.spring.dependency-management")
+        the<io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension>().apply {
+            imports {
+                mavenBom("org.springframework.boot:spring-boot-dependencies:3.4.1")
+                mavenBom("org.springframework.cloud:spring-cloud-dependencies:2024.0.0")
+            }
+        }
+
+        tasks.withType<Test> {
+            useJUnitPlatform()
+        }
+    }
+- type: code
+  filename: gradle.properties
+  lang: properties
+  content: |
+    org.gradle.jvmargs=-Xmx1g -XX:+HeapDumpOnOutOfMemoryError
+    org.gradle.caching=true
+    org.gradle.parallel=true
+- type: prose
+  content: 'Cuối cùng là **Gradle wrapper** — cặp script `gradlew` + jar nhỏ commit thẳng vào repo, để ai clone về cũng build được bằng đúng phiên bản Gradle 8.12 mà không cần cài Gradle. Sinh wrapper cần có Gradle trên máy MỘT lần duy nhất:'
+- type: command
+  label: Sinh Gradle wrapper 8.12
+  content: |
+    # Cài Gradle 1 lần để sinh wrapper (macOS: brew / đa nền tảng: sdkman.io)
+    brew install gradle
+
+    gradle wrapper --gradle-version 8.12
+- type: callout
+  variant: warning
+  content: Từ đây trở đi mọi lệnh build đều dùng `./gradlew` (wrapper), KHÔNG dùng lệnh gradle của máy — wrapper ghim đúng phiên bản 8.12 cho mọi người, mọi máy. Nhớ commit cả 4 file wrapper (gradlew, gradlew.bat, gradle/wrapper/*) vào git.
+- type: command
+  label: 'Kiểm tra khung: liệt kê 8 module'
+  content: |
+    ./gradlew projects
+    # Root project 'market-pulse'
+    # +--- Project ':aggregation'
+    # +--- Project ':alert-delivery'
+    # ... du 8 module (thu muc chua ton tai — Gradle van nhan dien tu settings)
+- type: command
+  label: Lưu mốc bước 1.3
+  content: |
+    git add settings.gradle.kts build.gradle.kts gradle.properties gradlew gradlew.bat gradle/
+    git commit -m "[step-1.3] Khung Gradle multi-project: settings + root build + toolchain 21 + wrapper 8.12"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-1.3)
+  url: https://github.com/KouTaru99/market-pulse/commit/2828352

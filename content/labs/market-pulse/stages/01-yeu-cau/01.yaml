@@ -1,0 +1,275 @@
+id: yc-01
+title: 'Khởi tạo dự án: README + Đặc tả yêu cầu'
+order: 1
+est_minutes: 35
+commit_ref: 7e8e293
+goal: Khởi tạo mono-repo và viết đặc tả yêu cầu cho nền tảng cảnh báo thị trường real-time gồm 7 service.
+deliverable: Repo git mới có README.md (bản đồ dự án), .gitignore và docs/requirements.md (R01–R07 + acceptance criteria).
+outcome_preview: Sau bước này bạn có bản đặc tả trả lời rõ "hệ thống phải làm được gì" — mọi chặng sau (và mọi lần tranh luận thiết kế) đều đối chiếu về đây.
+blocks:
+- type: prose
+  content: |
+    Chào mừng đến với Lab **Market Pulse** — lab lớn thứ hai của Praxis, và là một bậc nhảy so với Mini-Wiki: bạn sẽ xây một nền tảng B2B **cảnh báo thị trường real-time** chạy trên dòng dữ liệu THẬT từ Binance (sàn giao dịch crypto — WebSocket công khai, không cần tài khoản, khoảng 80 giao dịch/giây chỉ riêng cặp BTCUSDT).
+
+    Nghiệp vụ: khách hàng B2B (gọi là **tenant** — mỗi khách một "ngăn" riêng trên hệ thống) đặt **rule** kiểu "báo tôi khi giá BTC vượt 100.000". Hệ thống canh dòng giao dịch 24/7, khớp rule, bắn **alert** qua webhook, và tính cước theo mức dùng. Kiến trúc là **microservices ngay từ đầu**: 7 service Spring Boot nói chuyện qua hàng đợi RabbitMQ, mỗi service một database PostgreSQL riêng (db-per-service).
+- type: diagram
+  content: |
+    flowchart LR
+      BN[Binance WebSocket] --> MF[market-feed]
+      MF --> MQ[(RabbitMQ)]
+      MQ --> AG[aggregation]
+      MQ --> RE[rule-engine]
+      RE --> MQ
+      MQ --> AD[alert-delivery]
+      AD --> WH[Webhook cua khach]
+      KH[Khach B2B] --> GW[gateway]
+      GW --> ID[identity]
+      GW --> RE
+      GW --> BL[billing]
+- type: prose
+  content: |
+    Lab gồm **4 Phần / 10 Chặng / 78 bước**. Phần A đặt nền móng (chặng này + gateway/identity), Phần B thổi dòng dữ liệu sống vào hệ, Phần C xây nghiệp vụ cảnh báo, Phần D là mặt tiền dashboard và bài kiểm tra chịu tải. Nguyên tắc xuyên suốt: **hệ chạy được từng phần** — xong milestone nào bạn thấy kết quả milestone đó bằng docker compose profile, không phải dựng đủ 7 service mới thấy gì.
+
+    Cũng như mọi dự án thật, ta **không mở editor gõ code ngay**. Việc đầu tiên của Chặng 1 là trả lời: hệ thống này phải làm được gì, cho ai, và tốt tới mức nào.
+- type: command
+  label: Khởi tạo thư mục dự án
+  content: |
+    mkdir market-pulse && cd market-pulse
+    git init
+    mkdir -p docs
+- type: prose
+  content: Tạo `.gitignore` trước tiên — dự án Java/Gradle sinh rất nhiều file build không được phép vào git, và file `.env` chứa mật khẩu database thì tuyệt đối không commit.
+- type: code
+  filename: .gitignore
+  lang: gitignore
+  content: |
+    # ===== Java / Gradle =====
+    build/
+    .gradle/
+    out/
+    *.class
+    *.jar
+    *.war
+    *.ear
+    *.log
+
+    # Gradle wrapper (giữ gradle/wrapper/gradle-wrapper.jar trong repo)
+    !gradle/wrapper/gradle-wrapper.jar
+
+    # ===== Node / Frontend =====
+    node_modules/
+    dist/
+    .cache/
+    .vite/
+    *.local
+
+    # ===== IDE =====
+    .idea/
+    *.iml
+    *.iws
+    *.ipr
+    .vscode/
+    *.swp
+    *.swo
+    .DS_Store
+    Thumbs.db
+
+    # ===== Environment =====
+    # .env.example được commit, .env thật thì không
+    .env
+    .env.local
+    .env.*.local
+
+    # ===== market-feed: record files =====
+    # File NDJSON ghi từ Binance WS — có thể rất lớn
+    *.ndjson
+    data/
+
+    # ===== Docker =====
+    docker-compose.override.yml
+
+    # ===== Test / Coverage =====
+    coverage/
+    .nyc_output/
+    test-results/
+- type: prose
+  content: 'Tiếp theo là `README.md` — **bản đồ của cả dự án**: sơ đồ kiến trúc, cấu trúc mono-repo, bảng port từng service, danh sách compose profile và cách chạy từng phần. Với hệ 7 service, README tốt là thứ giữ cho bạn (và người sau) không lạc đường.'
+- type: code
+  filename: README.md
+  lang: markdown
+  content: |
+    # Market Pulse
+
+    Nền tảng cảnh báo thị trường real-time theo mô hình B2B. Tenant đăng ký rule (ngưỡng giá, thay đổi %, đột biến volume), khi điều kiện khớp hệ tự động gọi webhook. Dữ liệu đến từ Binance WebSocket (~80 trades/giây với BTC/USDT).
+
+    **Mục đích:** Đây là repo mẫu cho Lab lớn trên nền tảng Praxis — người học xây từng bước theo 10 chặng, mỗi chặng kết thúc bằng milestone có thể chạy thật.
+
+    ---
+
+    ## Kiến trúc tổng thể
+
+    ```
+                     ┌─────────────────────────────────────────────┐
+                     │           Tenant / Dashboard (FE)           │
+                     └──────────────────┬──────────────────────────┘
+                                        │ HTTP  X-API-Key: <raw-key>
+                     ┌──────────────────▼──────────────────────────┐
+                     │              gateway  :8080                  │
+                     │  GlobalFilter: auth + forward                │
+                     │  add X-Tenant-Id, remove X-API-Key          │
+                     └───┬───────────┬──────────┬───────────┬──────┘
+                   /keys │     /rules│  /alerts │    /usage │
+                         │           │          │           │
+            ┌────────────▼──┐  ┌─────▼──────┐ ┌▼──────────┐ ┌────▼───────┐
+            │ identity :8081│  │rule-engine │ │alert-del. │ │ billing    │
+            │ Tenant/Plan/  │  │   :8083    │ │   :8084   │ │   :8085    │
+            │ ApiKey CRUD   │  └─────┬──┬───┘ └─────┬─────┘ └────┬───────┘
+            └───────┬───────┘        │  │            │            │
+              PG    │                │  └──► GET /internal/quota  │
+            :5432   │    ┌───────────────────────────────────────────────────┐
+                    │    │               RabbitMQ  :5672 / :15672            │
+                    │    │  Exchanges:                                        │
+                    │    │   market-pulse.trades  (fanout)                   │
+                    │    │   market-pulse.candles (topic)                    │
+                    │    │   market-pulse.alerts  (direct)                   │
+                    │    │   market-pulse.quota   (direct)                   │
+                    │    └────────┬─────────────────────────────────────────┘
+                    │             │ TradeEvent
+                    │  ┌──────────▼──────────┐     ┌──────────────────────┐
+                    │  │  market-feed  :8082  │     │  aggregation  :8086  │
+                    │  │  Binance WS live /   │     │  1m OHLCV + VWAP     │
+                    │  │  record / replay ×N  │     │  rolling 60m volume  │
+                    │  └──────────────────────┘     └──────────┬───────────┘
+                    │                                    PG    │
+                    │                                  :5433   │
+                    │  identity-db :5432                       │
+                    │  aggregation-db :5433                    │ Candle1mEvent
+                    │  rule-engine-db :5434    ←───────────────┘
+                    │  alert-delivery-db :5435
+                    └─ billing-db :5436
+    ```
+
+    **Luồng dữ liệu chính:**
+
+    ```
+    Binance WS → market-feed → TradeEvent → RabbitMQ
+                                                ├─→ aggregation → Candle1mEvent → RabbitMQ → rule-engine
+                                                └─→ rule-engine (khi rule match)
+                                                        │ AlertTriggeredEvent → RabbitMQ
+                                                        ├─→ alert-delivery → POST webhook → tenant
+                                                        └─→ billing → đếm usage → quota check
+    ```
+
+    ---
+
+    ## Cấu trúc mono-repo
+
+    ```
+    market-pulse/
+    ├── common/              # Event DTOs dùng chung (duy nhất được share giữa service)
+    ├── gateway/             # Spring Cloud Gateway — auth + routing
+    ├── identity/            # Tenant, Plan, ApiKey CRUD
+    ├── market-feed/         # Binance WS client; live/record/replay mode
+    ├── aggregation/         # Tumbling 1m window; OHLCV + VWAP
+    ├── rule-engine/         # Rule evaluation; quota check
+    ├── alert-delivery/      # Webhook delivery + DB-backed retry
+    ├── billing/             # Usage counter; quota enforcement
+    ├── dashboard/           # React + Vite SPA (NOT Gradle subproject)
+    ├── infra/               # docker-compose.yml, .env.example, RabbitMQ definitions
+    ├── docs/
+    │   ├── requirements.md
+    │   └── adr/             # ADR-001 → ADR-004
+    └── README.md
+    ```
+
+    > **Quy tắc ranh giới service:** mỗi service chỉ được `implementation(project(":common"))`. Không import chéo giữa các service — vi phạm là build error. (Xem ADR-002)
+
+    ---
+
+    ## Bảng port
+
+    | Component | Port | Ghi chú |
+    |-----------|------|---------|
+    | `gateway` | 8080 | Cổng vào duy nhất cho tenant |
+    | `identity` | 8081 | Internal + qua gateway |
+    | `market-feed` | 8082 | Không expose REST ra ngoài |
+    | `rule-engine` | 8083 | Qua gateway |
+    | `alert-delivery` | 8084 | Qua gateway |
+    | `billing` | 8085 | Qua gateway + internal |
+    | `aggregation` | 8086 | Internal only |
+    | `dashboard` | 5173 | React dev server (Vite) |
+    | `identity-db` (PG) | 5432 | |
+    | `aggregation-db` (PG) | 5433 | |
+    | `rule-engine-db` (PG) | 5434 | |
+    | `alert-delivery-db` (PG) | 5435 | |
+    | `billing-db` (PG) | 5436 | |
+    | RabbitMQ AMQP | 5672 | |
+    | RabbitMQ Management UI | 15672 | `guest/guest` |
+    | Mailhog SMTP | 1025 | |
+    | Mailhog Web UI | 8025 | |
+
+    ---
+
+    ## Compose profile
+
+    Mỗi profile nhóm các service liên quan — khởi động từng phần mà không cần bật toàn bộ JVM từ Chặng 1.
+
+    | Profile | Service khởi động | Mục đích |
+    |---------|-------------------|---------|
+    | `core` | gateway, identity, identity-db | Auth + routing — Chặng 2 |
+    | `feed` | market-feed, rabbitmq | Dòng dữ liệu Binance — Chặng 3 |
+    | `processing` | aggregation, aggregation-db, rule-engine, rule-engine-db, rabbitmq | Aggregation + rule eval — Chặng 4–5 |
+    | `delivery` | alert-delivery, alert-delivery-db, billing, billing-db, mailhog, rabbitmq | Delivery + billing — Chặng 6–7 |
+    | `full` | tất cả + dashboard | End-to-end — Chặng 8–10 |
+
+    > **Lưu ý:** Các profile trên sẽ hoàn thiện dần theo chặng. Ở Chặng 1, file `docker-compose.yml` chưa tồn tại — được build từ Chặng 2 trở đi.
+
+    ```bash
+    # Ví dụ chạy profile core (Chặng 2 trở đi)
+    docker compose --profile core up -d
+
+    # Kiểm tra health
+    docker compose ps
+
+    # Xem log service cụ thể
+    docker compose logs -f gateway
+
+    # Dừng
+    docker compose --profile core down
+    ```
+
+    ---
+
+    ## Prerequisite
+
+    - Docker Desktop ≥ 4.x (Engine ≥ 24)
+    - Java 21 (Temurin/GraalVM CE)
+    - Gradle 8.x (wrapper tự tải — không cần cài tay)
+    - Node.js 20+ (chỉ cần cho `dashboard/`)
+    - RAM tối thiểu: 16 GB (profile `full` ~3.5–4.2 GB)
+
+    ---
+
+    ## Tham khảo
+
+    - [docs/requirements.md](docs/requirements.md) — Product requirements
+    - [docs/adr/](docs/adr/) — Architecture Decision Records
+    - Lab content: xem trên nền tảng Praxis
+- type: prose
+  content: 'Giờ tới phần cốt lõi: `docs/requirements.md`. Tài liệu đi từ **vấn đề** (vì sao doanh nghiệp cần canh thị trường tự động) → **goals / non-goals** (làm gì và cố tình KHÔNG làm gì) → **user stories** theo góc nhìn tenant → **R01–R07**: yêu cầu chi tiết cho từng service, kèm **acceptance criteria** (tiêu chí nghiệm thu — kịch bản chạy được để chứng minh hệ đạt yêu cầu) cho luồng end-to-end, retry webhook, vượt quota, chạy từng profile và chế độ replay.'
+- type: code
+  filename: docs/requirements.md
+  lang: markdown
+  content: "# Market Pulse — Product Requirements\n\n> **Phạm vi tài liệu này:** Yêu cầu sản phẩm Market Pulse (nền tảng B2B cảnh báo thị trường).  \n> Yêu cầu nền tảng Lab (Praxis) không nằm ở đây.\n\n---\n\n## 1. Vấn đề cần giải quyết\n\nDoanh nghiệp cần theo dõi biến động giá/volume trên thị trường tiền mã hoá. Giải pháp hiện tại là polling định kỳ hoặc xây custom script — tốn chi phí vận hành, dễ sót sự kiện, không scale.\n\n**Market Pulse** cung cấp hạ tầng cảnh báo real-time theo mô hình B2B:\n- Tenant đăng ký rule theo symbol + điều kiện.\n- Khi điều kiện khớp với dữ liệu live (~80 trades/giây từ Binance), hệ tự động gửi webhook.\n- Tenant không cần viết code polling, không cần quản lý kết nối WS, không cần lo retry khi delivery thất bại.\n\n**Chi phí nếu không có:** tự xây = tốn kỹ sư, khó maintain, miss nhiều edge case (reconnect WS, retry webhook, quota enforcement).\n\n---\n\n## 2. Goals\n\n| # | Outcome | Đo bằng |\n|---|---------|---------|\n| G1 | Hệ nhận dữ liệu Binance thật và xử lý real-time | `docker compose --profile full up` → 7 JVM + DB + RabbitMQ healthy; log trade Binance đầu tiên trong 10 giây |\n| G2 | Tenant tự quản lý rule và theo dõi alert không cần gọi API thủ công | Luồng tạo rule → alert trigger → webhook DELIVERED hoàn chỉnh trong Dashboard |\n| G3 | Hệ vận hành đúng quota — vượt hạn mức thì chặn rõ ràng, không drop silently | Rule thứ (limit+1) → HTTP 402; alert quota vượt → eval pause, không mất alert |\n| G4 | Webhook delivery tin cậy — fail tự retry, có audit trail đầy đủ | Retry 3 lần (1s → 4s → 16s); history đủ attempted_at + status_code + status |\n| G5 | Hệ phân tách module rõ ràng, mỗi service độc lập DB riêng | Không service nào query DB của service khác; giao tiếp chỉ qua REST internal + RabbitMQ |\n\n---\n\n## 3. Non-Goals\n\n| Điều không làm | Lý do |\n|---------------|-------|\n| Thanh toán thật (cổng payment) | Billing chỉ cần đếm usage + quota + xuất thông tin; không tích hợp PSP |\n| Multi-region / HA / Kubernetes | Nằm ngoài phạm vi nhập môn; ghi nhận để phát triển sau |\n| SMS delivery | Webhook + email giả lập đủ minh hoạ delivery pipeline; SMS tăng chi phí API |\n| Rule phức tạp (AND/OR, RSI/MACD, chỉ báo kỹ thuật) | v1 chỉ cần 3 loại rule; rule phức tạp là lab kế thừa |\n| Nguồn dữ liệu bổ sung (BrandWatch, Wikipedia) | Adapter tách bạch trong `market-feed` để sau thay Binance không đập lõi — nhưng implementation để sau |\n\n---\n\n## 4. User Stories (Persona B — Tenant B2B)\n\n### Rule management\n\n- **B1 (P0):** Là tenant B2B, muốn tạo alert rule (price threshold / % change / volume spike) cho symbol quan tâm, để hệ thống tự theo dõi thay vì phải polling thủ công.\n- **B2 (P0):** Là tenant B2B, muốn nhận webhook call với alert payload khi rule trigger, để tự động hoá hành động downstream không cần polling.\n- **B3 (P0):** Là tenant B2B, muốn xem alert history và delivery status (delivered / failed / retrying), để audit độ tin cậy của hệ.\n\n### Usage & quota\n\n- **B4 (P1):** Là tenant B2B, muốn xem usage hiện tại (active rules, alerts fired this month) so với quota, để lên kế hoạch capacity.\n\n### Edge cases\n\n- **B5 (P0):** Là tenant B2B, khi webhook delivery thất bại, muốn hệ tự retry với exponential backoff, để failure tạm thời không đồng nghĩa mất alert.\n- **B6 (P0):** Là tenant B2B, nếu vượt quota, muốn rule evaluation pause (không drop silently), để có cơ hội nâng gói hoặc giảm rule thủ công.\n\n---\n\n## 5. Requirements\n\n### P0 — Must-have\n\n---\n\n#### R01 — Hạ tầng repo & Docker Compose\n\n**Mô tả:** Mono-repo Gradle multi-project; 7 service Spring Boot + FE React/Vite + `infra/`.\n\n**Docker Compose profile:**\n\n| Profile | Service |\n|---------|---------|\n| `core` | gateway, identity, identity-db |\n| `feed` | market-feed, rabbitmq |\n| `processing` | aggregation, aggregation-db, rule-engine, rule-engine-db, rabbitmq |\n| `delivery` | alert-delivery, alert-delivery-db, billing, billing-db, mailhog, rabbitmq |\n| `full` | tất cả + dashboard |\n\n**Acceptance Criteria:**\n- `docker compose --profile core up -d` → gateway :8080 + identity :8081 healthy.\n- Mỗi profile `up` không lỗi `cannot connect to <service ngoài profile>`.\n- Service nào thiếu dependency ngoài profile → log WARN và tiếp tục, không crash JVM.\n\n---\n\n#### R02 — `market-feed`: 3 chế độ hoạt động\n\n**Mô tả:** Connector Binance WebSocket với 3 mode runtime.\n\n| Mode | Hành vi |\n|------|---------|\n| `live` | Kết nối Binance WS public; chuẩn hoá trade → TradeEvent; publish queue; auto-reconnect khi mất kết nối |\n| `record` | Giống `live` + ghi NDJSON ra file với timestamp gốc |\n| `replay` | Đọc file NDJSON đã record; phát lại với multiplier ×N; giữ tỉ lệ thời gian tương đối |\n\n**Acceptance Criteria:**\n- Chuyển mode bằng env `FEED_MODE=live|record|replay`.\n- `replay` ×3: phát đúng thứ tự timestamp, hoàn thành trong 1/3 thời gian gốc (±10%).\n- `live` mất kết nối WS → log WARN, không crash JVM, tự reconnect trong 30 giây.\n\n---\n\n#### R03 — `rule-engine`: 3 loại rule\n\n**Mô tả:** Evaluate rule theo trade stream và candle stream real-time.\n\n| Loại rule | Điều kiện trigger |\n|-----------|-------------------|\n| `PRICE_THRESHOLD` | Symbol X vượt/tụt mức giá P (so với trade mới nhất) |\n| `PERCENT_CHANGE` | Symbol X thay đổi ≥ p% trong N phút (dùng dữ liệu aggregation) |\n| `VOLUME_SPIKE` | Volume 1 phút ≥ k× trung bình 60 phút (dùng dữ liệu aggregation) |\n\n**Acceptance Criteria:**\n- `PRICE_THRESHOLD` kích hoạt trong vòng 1 giây kể từ trade vượt ngưỡng.\n- `PERCENT_CHANGE` chính xác ±0.1% so với tính tay trên cùng window.\n- `VOLUME_SPIKE` không false-positive khi volume đều đặn.\n- Rule bị EVAL_PAUSED (do quota) → không trigger, không mất dữ liệu.\n\n---\n\n#### R04 — `alert-delivery`: webhook + retry\n\n**Mô tả:** Gửi HTTP POST đến endpoint webhook của tenant khi rule trigger; xử lý retry và audit.\n\n**Payload webhook:**\n```json\n{\n  \"alertId\": \"uuid\",\n  \"ruleId\": \"uuid\",\n  \"symbol\": \"BTCUSDT\",\n  \"ruleType\": \"PRICE_THRESHOLD\",\n  \"triggeredAt\": \"2026-07-04T10:00:00Z\",\n  \"triggerValue\": \"49850.00\"\n}\n```\n\n**Retry logic:**\n- `2xx` → status `DELIVERED`\n- `4xx` → status `CLIENT_ERROR`, không retry\n- `5xx` / timeout → retry sau 1s, 4s, 16s; sau 3 lần → `FAILED`\n\n**Acceptance Criteria:**\n- Alert history lưu đủ: attempted_at, http_status, status mỗi attempt.\n- Sau 3 lần thất bại: status = FAILED, không retry thêm.\n- Alert vẫn xuất hiện trong history kể cả khi FAILED.\n\n---\n\n#### R05 — `identity` + `gateway`: Tenant và API key\n\n**Mô tả:** Tenant quản lý API key; gateway xác thực mọi request trước khi forward.\n\n**Auth flow:**\n1. Gateway nhận `X-API-Key: <raw-key>`.\n2. Tính SHA-256 hash; tra cache Caffeine (TTL 5s).\n3. Cache miss → gọi `identity GET /internal/keys/{hash}`.\n4. Key hợp lệ → thêm `X-Tenant-Id`, xoá `X-API-Key`, forward.\n5. Key không tồn tại / revoked → 401.\n\n**Acceptance Criteria:**\n- Request không có key → 401.\n- Key sai → 401.\n- Key bị revoke → 401 trong vòng 5 giây (TTL cache hết).\n- Request hợp lệ → forward giữ nguyên body.\n\n---\n\n#### R06 — `billing`: usage + quota\n\n**Mô tả:** Đếm usage theo tenant; enforce quota theo gói.\n\n**Quota enforcement:**\n- **Rule quota (sync):** rule-engine check `billing GET /internal/quota/{tenantId}` khi tạo rule; cache 30s.\n- **Alert quota (async event-driven):** billing consume AlertTriggeredEvent → đếm; khi vượt → phát `QuotaExceededEvent` → rule-engine pause eval tenant.\n\n**Acceptance Criteria:**\n- `usage.alertsFired` khớp đếm tay từ alert_history.\n- Vượt quota rule → HTTP 402 khi tạo rule thứ (limit+1); rule không được tạo.\n- Usage reset đúng đầu kỳ (tháng).\n- Vượt quota alert → rule eval pause, không drop alert đã trigger trước đó.\n\n---\n\n#### R07 — `dashboard` (FE portal)\n\n**Mô tả:** React + Vite SPA — giao diện quản lý đầy đủ cho tenant.\n\n**Tính năng:**\n- Quản lý API key: tạo, xem danh sách, thu hồi.\n- Rule CRUD: tạo (symbol + type + params + webhookUrl), xem danh sách, xoá.\n- Alert history: phân trang, filter; xem delivery attempts từng alert.\n- Usage widget: active rules vs limit, alerts fired vs limit (progress bar).\n\n**Acceptance Criteria:**\n- Luồng \"tạo rule → thấy alert trigger → xem webhook DELIVERED\" hoàn chỉnh trong UI, không cần gọi API thủ công.\n- Dashboard hiển thị thông báo rõ khi vượt quota.\n- API key raw chỉ hiển thị 1 lần ngay sau khi tạo.\n\n---\n\n## 6. Acceptance Criteria tổng hợp\n\n### Happy path — luồng end-to-end\n\n```\nGiven: docker compose --profile full up -d (7 service + RabbitMQ + 5 PG + Mailhog)\n  And: tenant T1 đã tạo, API key K1 issued\n  And: rule R1 = PRICE_THRESHOLD BTC/USDT BELOW 50000\n        webhook = http://localhost:9999/hook\nWhen:  market-feed ở chế độ live\n  And: BTC/USDT trade price xuống dưới 50000\nThen:  trong vòng 2 giây, alert-delivery gửi POST đến localhost:9999/hook\n  And: payload chứa ruleId=R1, symbol=BTCUSDT, triggeredAt (ISO-8601), triggerValue < 50000\n  And: alert history trong dashboard hiển thị status=DELIVERED\n  And: billing tăng alertsFired cho tenant T1 thêm 1\n```\n\n### Retry khi webhook fail\n\n```\nGiven: endpoint webhook trả HTTP 500 liên tục\nWhen:  rule trigger → alert-delivery nhận AlertTriggeredEvent\nThen:  thử lại sau 1s, thử lại sau 4s, thử lại sau 16s\n  And: sau lần thứ 3 thất bại → status = FAILED, không retry thêm\n  And: alert xuất hiện trong history với status = FAILED và attemptCount = 3\n```\n\n### Quota rule vượt mức\n\n```\nGiven: tenant T1 có gói giới hạn 2 active rules\n  And: T1 đã tạo 2 rule đang ACTIVE\nWhen:  T1 gọi POST /api/v1/rules để tạo rule thứ 3\nThen:  gateway/rule-engine trả HTTP 402 { \"error\": \"QUOTA_EXCEEDED_RULES\" }\n  And: không có rule nào được tạo trong DB\n  And: dashboard hiển thị thông báo vượt quota\n```\n\n### Compose profile độc lập\n\n```\nGiven: docker compose --profile feed up -d\nWhen:  market-feed khởi động\nThen:  market-feed + rabbitmq healthy\n  And: không lỗi \"cannot connect to gateway/identity/aggregation\"\n  And: market-feed log được ít nhất 1 trade từ Binance WS trong 10 giây\n```\n\n### Replay mode\n\n```\nGiven: file record có 1000 trade BTC/USDT ghi ở tốc độ thật (T giây)\n  And: FEED_MODE=replay, REPLAY_MULTIPLIER=3\nWhen:  market-feed khởi động chế độ replay\nThen:  1000 trade phát hết trong khoảng T/3 giây (±10%)\n  And: thứ tự timestamp giữ nguyên\n  And: trade đẩy vào RabbitMQ queue giống chế độ live\n```\n\n### Negative cases\n\n| Tình huống | Kết quả mong đợi |\n|------------|-----------------|\n| YAML chặng không có field `part` | Sidenav vẫn render, không crash |\n| API key bị revoke | Request tiếp theo trong ≤5s → 401 |\n| market-feed mất WS Binance | Log WARN, JVM không crash, tự reconnect |\n| webhook endpoint không reach được | Timeout → retry theo lịch |\n\n---\n\n## 7. Open Questions (đã giải quyết)\n\n| # | Câu hỏi | Quyết định |\n|---|---------|------------|\n| OQ1 | RabbitMQ vs Kafka? | **RabbitMQ** — tiết kiệm ~500MB RAM, DLQ native. (ADR-001) |\n| OQ2 | Mono-repo vs multi-repo? | **Mono-repo** Gradle multi-project — 1 commit = 1 state hoàn chỉnh. (ADR-002) |\n| OQ3 | Quota check ở đâu? | **Hybrid**: rule CRUD = sync REST; alert quota = async event. (ADR-003) |\n| OQ4 | Dashboard FE stack? | **React + Vite** — nhất quán prereq. (ADR-004) |\n| OQ5 | \"Gãy\" Chặng 9 định nghĩa thế nào? | Queue depth > 5,000 msg VÀ tăng = tiêu chí chính. (architecture §7.1) |\n"
+- type: callout
+  variant: tip
+  content: Đọc kỹ nhóm **R03 (3 loại rule)** và **R04 (webhook + retry)** — đây là trái tim nghiệp vụ của cả hệ. Ba loại rule v1 (ngưỡng giá, phần trăm thay đổi, volume spike) được chốt CÓ CHỦ ĐÍCH ở mức đủ nhỏ; danh sách non-goals ghi rõ những gì để sau (rule tổ hợp, thanh toán thật, K8s...) — cắt phạm vi minh bạch là kỹ năng, không phải thiếu sót.
+- type: command
+  label: Lưu mốc bước 1.1
+  content: |
+    git add .
+    git commit -m "[step-1.1] Khoi tao du an: README + dac ta yeu cau + .gitignore"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-1.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/7e8e293

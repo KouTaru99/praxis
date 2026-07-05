@@ -1,0 +1,129 @@
+id: yc-04
+title: 'common/: 4 hợp đồng sự kiện (event contract)'
+order: 4
+est_minutes: 20
+commit_ref: cebbebf
+goal: Định nghĩa 4 sự kiện chạy qua RabbitMQ dưới dạng Java record trong module common — hợp đồng chung của cả hệ.
+deliverable: 'Module common với 4 record: TradeEvent, Candle1mEvent, AlertTriggeredEvent, QuotaExceededEvent.'
+outcome_preview: 'Sau bước này, "ngôn ngữ chung" của 7 service đã được đóng dấu: service nào cũng nói chuyện bằng đúng 4 loại sự kiện này, không tự bịa format riêng.'
+blocks:
+- type: prose
+  content: |
+    Trong kiến trúc hướng sự kiện (event-driven), các service KHÔNG gọi thẳng nhau mà gửi **sự kiện** qua hàng đợi. Để bên gửi và bên nhận hiểu nhau, cấu trúc sự kiện phải là **hợp đồng chung** — đặt ở module `common`, module DUY NHẤT các service được phép share (ranh giới đã chốt ở ADR-002).
+
+    Ta dùng **Java record** — kiểu dữ liệu bất biến, gọn (1 dòng khai báo đủ constructor + getter + equals), rất hợp cho DTO sự kiện:
+
+    - **TradeEvent** — 1 giao dịch thô từ Binance (market-feed phát, aggregation + rule-engine nghe).
+    - **Candle1mEvent** — nến 1 phút đã gom (aggregation phát, rule-engine nghe để tính phần trăm thay đổi + volume spike).
+    - **AlertTriggeredEvent** — rule khớp, cần bắn cảnh báo (rule-engine phát, alert-delivery + billing nghe).
+    - **QuotaExceededEvent** — tenant xài vượt gói (billing phát, rule-engine nghe để tạm dừng đánh giá).
+- type: code
+  filename: common/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        `java-library`
+    }
+
+    // common chỉ chứa DTO — không phụ thuộc Spring
+    dependencies {
+        // Jackson annotation để serialize/deserialize khi gửi qua AMQP
+        api("com.fasterxml.jackson.core:jackson-databind")
+    }
+- type: code
+  filename: common/src/main/java/com/marketpulse/common/event/TradeEvent.java
+  lang: java
+  content: |
+    package com.marketpulse.common.event;
+
+    /**
+     * Sự kiện giao dịch thô từ Binance WebSocket.
+     * Exchange: market-pulse.trades (fanout)
+     * Routing key: <symbol>
+     */
+    public record TradeEvent(
+            String symbol,
+            String price,       // chuỗi để giữ độ chính xác thập phân
+            String quantity,
+            long tradeId,
+            long tradeTime      // epoch milliseconds
+    ) {}
+- type: code
+  filename: common/src/main/java/com/marketpulse/common/event/Candle1mEvent.java
+  lang: java
+  content: |
+    package com.marketpulse.common.event;
+
+    /**
+     * Nến 1 phút do aggregation tổng hợp và phát ra.
+     * Exchange: market-pulse.candles (topic)
+     * Routing key: <symbol>.1m
+     */
+    public record Candle1mEvent(
+            String symbol,
+            long openTime,      // epoch milliseconds — đầu phút
+            String open,
+            String high,
+            String low,
+            String close,
+            String volume,
+            int tradeCount
+    ) {}
+- type: code
+  filename: common/src/main/java/com/marketpulse/common/event/AlertTriggeredEvent.java
+  lang: java
+  content: |
+    package com.marketpulse.common.event;
+
+    /**
+     * Sự kiện cảnh báo được kích hoạt bởi rule-engine.
+     * Exchange: market-pulse.alerts (direct)
+     * Routing key: alert
+     * Consumers: alert-delivery, billing
+     */
+    public record AlertTriggeredEvent(
+            String alertId,         // UUID
+            String ruleId,          // UUID
+            String tenantId,        // UUID
+            String symbol,
+            String ruleType,        // PRICE_THRESHOLD | PERCENT_CHANGE | VOLUME_SPIKE
+            String triggeredAt,     // ISO-8601
+            String triggerValue,    // giá trị tại thời điểm trigger
+            String webhookUrl
+    ) {}
+- type: code
+  filename: common/src/main/java/com/marketpulse/common/event/QuotaExceededEvent.java
+  lang: java
+  content: |
+    package com.marketpulse.common.event;
+
+    /**
+     * Sự kiện quota vượt mức, do billing phát ra.
+     * Exchange: market-pulse.quota (direct)
+     * Routing key: quota.exceeded
+     * Consumer: rule-engine (pause eval cho tenant)
+     */
+    public record QuotaExceededEvent(
+            String tenantId,        // UUID
+            String quotaType,       // RULES | ALERTS
+            int currentCount,
+            int limit,
+            String timestamp        // ISO-8601
+    ) {}
+- type: command
+  label: Build thử module common
+  content: |
+    ./gradlew :common:build
+    # BUILD SUCCESSFUL
+- type: callout
+  variant: tip
+  content: Sửa một event record là sửa HỢP ĐỒNG của nhiều service cùng lúc — về sau khi muốn thêm field, hãy nghĩ tới mọi bên đang nghe sự kiện đó. Đây chính là lý do event contract được tách riêng và giữ nhỏ.
+- type: command
+  label: Lưu mốc bước 1.4
+  content: |
+    git add common
+    git commit -m "[step-1.4] common/: 4 event DTO (record) theo contract queue"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-1.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/cebbebf
