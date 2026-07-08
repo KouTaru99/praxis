@@ -2,7 +2,7 @@ id: test-01
 title: Viết test (Vitest + Supertest)
 order: 1
 est_minutes: 45
-commit_ref: 66691b8
+commit_ref: d2da180
 goal: Viết unit test + integration test cho API, chạy trên một database test riêng biệt.
 deliverable: Bộ test (slug, markdown, articles, tags, search) chạy xanh; coverage ≥ 70%.
 outcome_preview: Bạn sẽ chạy npm test và thấy 31 test pass cùng báo cáo độ phủ — lưới an toàn cho mọi thay đổi sau này.
@@ -14,6 +14,12 @@ blocks:
   variant: warning
   content: |
     **Lab này dùng Node 22 LTS** (không phải Node 20). Chuỗi thư viện `isomorphic-dompurify` + `jsdom` (mà test markdown cần) đòi `require(ESM)`, chỉ hoạt động đúng từ Node 22.12 trở lên. Tạo file `.nvmrc` chứa đúng số `22`, rồi chạy `nvm use` để chốt phiên bản. Đây là một quyết định kỹ thuật có thật trong dự án — và là lý do tốt để hiểu vì sao "phiên bản runtime" cũng là một phần của kiến trúc.
+
+    **Cập nhật:** ngay cả đúng Node 22, `jsdom` (bản mới) vẫn có thể kéo theo 2 gói con **ESM-only** làm `npm test` crash ngay lập tức với lỗi `require() of ES Module ... not supported`: `cssstyle` ≥ 4.2.0 (qua `@asamuzakjp/css-color`) và `parse5` ≥ 8. Đây là bug đóng gói của chính 2 thư viện đó (jsdom/cssstyle#182 trên GitHub), không phải lỗi bạn viết sai. Cách vá — ghim version qua `overrides` trong `api/package.json`:
+    ```json
+    "overrides": { "cssstyle": "4.1.0", "parse5": "7.3.0" }
+    ```
+    Chạy lại `npm install` sau khi thêm là hết lỗi.
 - type: prose
   content: |
     Để Supertest gọi được app mà không cần `listen`, ta **tách app.ts khỏi index.ts**: `app.ts` chỉ tạo và export `app`; `index.ts` chỉ `app.listen(...)`. Test import `app`, production import `index`:
@@ -70,7 +76,9 @@ blocks:
         coverage: {
           provider: 'v8',
           include: ['src/**'],
-          exclude: ['src/index.ts', '**/*.test.ts', 'src/test/**'],
+          // src/db/**: schema khai báo thuần + script CLI (migrate/seed/reset,
+          // chạy qua tsx, không phải business logic đi qua HTTP layer).
+          exclude: ['src/index.ts', '**/*.test.ts', 'src/test/**', 'src/db/**'],
           thresholds: { lines: 70, functions: 70, statements: 70, branches: 70 },
         },
       },
@@ -83,13 +91,14 @@ blocks:
   lang: typescript
   content: |
     import { afterAll, beforeEach } from 'vitest';
-    import { prisma } from '../lib/prisma.js';
+    import { sql } from 'drizzle-orm';
+    import { db, pool } from '../lib/db.js';
 
     // Xóa sạch + reset id về 1 trước mỗi test -> test độc lập, id đoán được
     beforeEach(async () => {
-      await prisma.$executeRawUnsafe('TRUNCATE article_tags, articles, tags RESTART IDENTITY CASCADE');
+      await db.execute(sql`TRUNCATE article_tags, articles, tags RESTART IDENTITY CASCADE`);
     });
-    afterAll(async () => { await prisma.$disconnect(); });
+    afterAll(async () => { await pool.end(); });
 - type: prose
   content: |
     **Unit test** — kiểm hàm thuần, chạy nhanh, không cần DB. Ví dụ test `toSlug` và test XSS của `renderMarkdown`:
@@ -170,5 +179,5 @@ blocks:
     git add . && git commit -m "[step-5.1] Vitest unit + Supertest integration (31 test)"
 - type: resource
   label: Commit đối chiếu — bộ test đầy đủ (step-5.1)
-  url: https://github.com/KouTaru99/mini-wiki/commit/66691b8
+  url: https://github.com/KouTaru99/mini-wiki/commit/d2da180
   kind: docs

@@ -2,7 +2,7 @@ id: be-01
 title: Khởi tạo project Express + TypeScript
 order: 1
 est_minutes: 30
-commit_ref: c6640f1
+commit_ref: 0ef9477
 goal: Dựng bộ khung server Express bằng TypeScript, với xử lý lỗi tập trung ngay từ đầu.
 deliverable: Thư mục api/ chạy được; GET /health trả JSON status ok.
 outcome_preview: Bạn sẽ gọi http://localhost:3000/health và nhận về JSON trạng thái ok — server đã sống.
@@ -15,11 +15,11 @@ blocks:
   content: |
     mkdir api && cd api
     npm init -y
-    npm install express cors morgan dotenv @prisma/client
-    npm install -D typescript tsx prisma @types/express @types/cors @types/morgan @types/node
+    npm install express cors morgan dotenv drizzle-orm pg
+    npm install -D typescript tsx drizzle-kit @types/express @types/cors @types/morgan @types/node @types/pg
 - type: prose
   content: |
-    Cấu hình `package.json` — chú ý `"type": "module"` (dùng ES Module) và các script tiện cho Prisma:
+    Cấu hình `package.json` — chú ý `"type": "module"` (dùng ES Module) và các script cho Drizzle. Khác Prisma (1 lệnh `migrate dev` vừa tạo vừa áp), Drizzle tách rõ 2 bước: `db:generate` sinh SQL từ diff schema, `migrate` mới thật sự áp vào DB:
 - type: code
   filename: api/package.json
   lang: json
@@ -32,11 +32,11 @@ blocks:
         "dev": "NODE_ENV=development tsx watch src/index.ts",
         "build": "tsc",
         "start": "node dist/index.js",
-        "migrate": "prisma migrate deploy",
-        "seed": "prisma db seed",
-        "generate": "prisma generate"
-      },
-      "prisma": { "seed": "tsx prisma/seed.ts" }
+        "db:generate": "drizzle-kit generate",
+        "migrate": "tsx src/db/migrate.ts",
+        "seed": "tsx src/db/seed.ts",
+        "db:reset": "tsx src/db/reset.ts && npm run migrate && npm run seed"
+      }
     }
 - type: code
   filename: api/tsconfig.json
@@ -58,36 +58,34 @@ blocks:
     }
 - type: prose
   content: |
-    Tạo một **Prisma client dùng chung** (singleton). Mẹo `globalThis` ngăn `tsx watch` tạo nhiều kết nối mỗi lần hot-reload:
+    Tạo một **Drizzle client dùng chung**. Khác Prisma (class `PrismaClient` tự sinh), Drizzle chỉ cần khởi tạo 1 `Pool` (driver `pg` thuần) rồi bọc qua `drizzle()`. Mẹo `globalThis` vẫn giữ nguyên — ngăn `tsx watch` tạo nhiều Pool mỗi lần hot-reload:
 - type: code
-  filename: api/src/lib/prisma.ts
+  filename: api/src/lib/db.ts
   lang: typescript
   content: |
-    import { PrismaClient } from '@prisma/client';
+    import { drizzle } from 'drizzle-orm/node-postgres';
+    import { Pool } from 'pg';
 
-    // globalThis cache: ngăn tsx watch tạo nhiều PrismaClient khi hot-reload
-    const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+    // globalThis cache: ngăn tsx watch tạo nhiều Pool khi hot-reload
+    const globalForDb = globalThis as unknown as { pool?: Pool };
 
-    export const prisma =
-      globalForPrisma.prisma ??
-      new PrismaClient({
-        log: process.env.NODE_ENV === 'development' ? ['query'] : [],
-      });
+    export const pool = globalForDb.pool ?? new Pool({ connectionString: process.env.DATABASE_URL });
 
     if (process.env.NODE_ENV !== 'production') {
-      globalForPrisma.prisma = prisma;
+      globalForDb.pool = pool;
     }
+
+    export const db = drizzle({ client: pool });
 - type: prose
   content: |
-    Đây là phần quan trọng nhất bước này: **middleware xử lý lỗi tập trung**. Thay vì mỗi controller tự `try/catch` rồi trả lỗi mỗi kiểu, ta gom về một chỗ — map lỗi Prisma (slug trùng, không tìm thấy, tag đang dùng) sang đúng HTTP code, mọi lỗi lạ đều log ra stderr:
+    Đây là phần quan trọng nhất bước này: **middleware xử lý lỗi tập trung**. Thay vì mỗi controller tự `try/catch` rồi trả lỗi mỗi kiểu, ta gom về một chỗ. Prisma từng trừu tượng hóa lỗi DB thành mã `P-code` riêng (P2002, P2025...); dùng `pg` trực tiếp thì đọc thẳng **mã lỗi SQLSTATE chuẩn của Postgres** (`23505` = unique_violation, `23503` = foreign_key_violation) — ít lớp trừu tượng hơn, và là kiến thức dùng được với bất kỳ driver Postgres nào, không riêng gì 1 ORM:
 - type: code
   filename: api/src/middleware/errorHandler.ts
   lang: typescript
   content: |
-    import { Prisma } from '@prisma/client';
     import type { NextFunction, Request, Response } from 'express';
 
-    // AppError: lỗi có chủ ý từ business logic (controller ném ra thay vì lỗi Prisma thô)
+    // AppError: lỗi có chủ ý từ business logic (controller ném ra thay vì lỗi DB thô)
     export class AppError extends Error {
       constructor(
         public readonly statusCode: number,
@@ -97,6 +95,27 @@ blocks:
         super(message);
         this.name = 'AppError';
       }
+    }
+
+    // Lỗi PostgreSQL (qua driver `pg`) có SQLSTATE `code` + tên `constraint` vi phạm.
+    interface PgError {
+      code: string;
+      constraint?: string;
+    }
+
+    function hasStringCode(err: unknown): err is PgError {
+      return typeof err === 'object' && err !== null && 'code' in err
+        && typeof (err as { code: unknown }).code === 'string';
+    }
+
+    // Drizzle bọc lỗi driver gốc vào DrizzleQueryError, lỗi pg thật nằm ở
+    // `.cause` (chuẩn Error cause-chaining của Node) — bóc dần tới khi gặp.
+    function extractPgError(err: unknown): PgError | undefined {
+      if (hasStringCode(err)) return err;
+      if (typeof err === 'object' && err !== null && 'cause' in err) {
+        return extractPgError((err as { cause: unknown }).cause);
+      }
+      return undefined;
     }
 
     // Error middleware của Express PHẢI có đủ 4 tham số (err, req, res, next)
@@ -111,18 +130,14 @@ blocks:
         return;
       }
 
-      if (err instanceof Prisma.PrismaClientKnownRequestError) {
-        if (err.code === 'P2002') {
-          const target = (err.meta?.target as string[] | undefined) ?? [];
-          const code = target.some((f) => f.includes('slug')) ? 'SLUG_CONFLICT' : 'TAG_NAME_CONFLICT';
-          res.status(409).json({ error: { code, message: `Giá trị đã tồn tại: ${target.join(', ')}.` } });
+      const pgError = extractPgError(err);
+      if (pgError) {
+        if (pgError.code === '23505') {
+          const code = pgError.constraint?.includes('slug') ? 'SLUG_CONFLICT' : 'TAG_NAME_CONFLICT';
+          res.status(409).json({ error: { code, message: `Giá trị đã tồn tại (constraint: ${pgError.constraint}).` } });
           return;
         }
-        if (err.code === 'P2025') {
-          res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Không tìm thấy bản ghi.' } });
-          return;
-        }
-        if (err.code === 'P2003') {
+        if (pgError.code === '23503') {
           res.status(409).json({ error: { code: 'TAG_IN_USE', message: 'Tag đang gắn bài viết, không thể xóa.' } });
           return;
         }
@@ -131,6 +146,10 @@ blocks:
       console.error('[ERROR 500]', err); // NFR-8: không nuốt lỗi thầm
       res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Đã xảy ra lỗi phía server.' } });
     }
+- type: callout
+  variant: info
+  content: |
+    **Vì sao phải bóc `.cause`?** Drizzle không ném thẳng lỗi `pg` gốc — nó bọc vào `DrizzleQueryError` để thêm ngữ cảnh (câu SQL, tham số). Lỗi Postgres thật (với `.code`/`.constraint`) nằm ở `err.cause`. Đây là bẫy dễ gặp: nếu chỉ kiểm `'code' in err` trên lỗi ngoài cùng, `errorHandler` sẽ không bao giờ khớp — mọi lỗi trùng slug/tên đều rơi vào nhánh 500 thay vì 409 đúng nghĩa.
 - type: prose
   content: |
     Thêm `notFound` bắt mọi route lạ, rồi ráp tất cả vào `src/index.ts` — điểm khởi động server:
@@ -186,8 +205,8 @@ blocks:
   content: |
     npm run dev
     # mở tab khác: curl http://localhost:3000/health  ->  {"status":"ok",...}
-    git add api && git commit -m "[step-3.1] scaffold Express 5 + TypeScript"
+    git add api && git commit -m "[step-3.1] scaffold Express 5 + TypeScript + Drizzle client"
 - type: resource
   label: Commit đối chiếu (step-3.1)
-  url: https://github.com/KouTaru99/mini-wiki/commit/c6640f1
+  url: https://github.com/KouTaru99/mini-wiki/commit/0ef9477
   kind: docs

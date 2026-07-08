@@ -2,7 +2,7 @@ id: be-05
 title: Tìm kiếm full-text (PostgreSQL FTS)
 order: 5
 est_minutes: 35
-commit_ref: b4bd4ec
+commit_ref: b928882
 goal: Thêm endpoint tìm kiếm toàn văn dùng GIN index của PostgreSQL — an toàn trước SQL injection.
 deliverable: api/src/controllers/search.controller.ts + route; GET /api/search?q=... trả bài khớp.
 outcome_preview: Bạn sẽ gõ một từ khóa và nhận về danh sách bài viết chứa từ đó, tìm trong cả tiêu đề lẫn nội dung.
@@ -11,18 +11,18 @@ blocks:
   content: |
     Bước cuối Chặng 3: **tìm kiếm toàn văn (Full-Text Search)**. PostgreSQL làm việc này sẵn, không cần Elasticsearch. Ta tận dụng **GIN index** đã tạo ở migration (Chặng 2) qua truy vấn `to_tsvector ... @@ plainto_tsquery`.
 
-    Vì đây là truy vấn SQL nâng cao mà Prisma Client không có sẵn API, ta dùng `$queryRaw` — nhưng phải dùng **Prisma.sql tham số hóa** (`${...}`), tuyệt đối không nối chuỗi:
+    Vì đây là truy vấn SQL nâng cao mà query builder không có sẵn API, ta dùng `db.execute()` — nhưng phải dùng **`sql` tagged template tham số hóa** (`${...}`), tuyệt đối không nối chuỗi. Cú pháp gần như song song với `Prisma.sql` trước đây, chỉ khác tên hàm/import:
 - type: code
   filename: api/src/controllers/search.controller.ts
   lang: typescript
   content: |
     import type { Request, Response } from 'express';
-    import { Prisma } from '@prisma/client';
+    import { sql } from 'drizzle-orm';
     import { AppError } from '../middleware/errorHandler.js';
-    import { prisma } from '../lib/prisma.js';
+    import { db } from '../lib/db.js';
+    import { loadTagsForArticles } from '../lib/articleTags.js';
 
     type RawArticleRow = { id: number; title: string; slug: string; published_at: Date | null };
-    type TagSummary = { id: number; name: string; slug: string };
 
     // S1 — GET /api/search?q=&page=&limit=
     export async function search(req: Request, res: Response) {
@@ -35,34 +35,23 @@ blocks:
 
       // ${q}, ${limit}, ${offset} được THAM SỐ HÓA -> không thể inject SQL.
       // GIN index trên to_tsvector('simple', title || ' ' || content) tăng tốc.
-      const [rows, countRows] = await Promise.all([
-        prisma.$queryRaw<RawArticleRow[]>(Prisma.sql`
+      const [rowsResult, countResult] = await Promise.all([
+        db.execute<RawArticleRow>(sql`
           SELECT id, title, slug, published_at FROM articles
           WHERE to_tsvector('simple', title || ' ' || content) @@ plainto_tsquery('simple', ${q})
           ORDER BY published_at DESC NULLS LAST, id DESC
           LIMIT ${limit} OFFSET ${offset}
         `),
-        prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`
+        db.execute<{ count: string }>(sql`
           SELECT COUNT(*) AS count FROM articles
           WHERE to_tsvector('simple', title || ' ' || content) @@ plainto_tsquery('simple', ${q})
         `),
       ]);
-      const total = Number(countRows[0]?.count ?? 0);
+      const rows = rowsResult.rows;
+      const total = Number(countResult.rows[0]?.count ?? 0);
 
-      // Lấy tags theo batch (1 query cho mọi bài) -> tránh N+1 query
-      const articleIds = rows.map((r) => r.id);
-      const tagMap = new Map<number, TagSummary[]>();
-      if (articleIds.length > 0) {
-        const atRows = await prisma.articleTag.findMany({
-          where: { articleId: { in: articleIds } },
-          include: { tag: { select: { id: true, name: true, slug: true } } },
-        });
-        for (const at of atRows) {
-          const list = tagMap.get(at.articleId) ?? [];
-          list.push({ id: at.tag.id, name: at.tag.name, slug: at.tag.slug });
-          tagMap.set(at.articleId, list);
-        }
-      }
+      // Lấy tags theo batch — dùng lại helper viết ở bước 3.3, tránh N+1 query
+      const tagMap = await loadTagsForArticles(rows.map((r) => r.id));
 
       const data = rows.map((r) => ({
         id: r.id, title: r.title, slug: r.slug,
@@ -87,11 +76,11 @@ blocks:
 - type: callout
   variant: warning
   content: |
-    **$queryRaw chỉ an toàn khi tham số hóa.** Nếu bạn nối thẳng từ khóa vào câu SQL (kiểu `'...' + q + '...'`), kẻ tấn công gõ từ khóa độc hại có thể *thoát* khỏi chuỗi và chạy SQL tùy ý — đó là **SQL Injection**. Cú pháp Prisma.sql với `${q}` gửi `q` như một *tham số riêng*, không phải một phần câu lệnh — DB tự xử lý an toàn. Đây là quy tắc bất di bất dịch khi viết raw SQL.
+    **db.execute chỉ an toàn khi tham số hóa.** Nếu bạn nối thẳng từ khóa vào câu SQL (kiểu `'...' + q + '...'`), kẻ tấn công gõ từ khóa độc hại có thể *thoát* khỏi chuỗi và chạy SQL tùy ý — đó là **SQL Injection**. Cú pháp `sql` tagged template với `${q}` gửi `q` như một *tham số riêng*, không phải một phần câu lệnh — DB tự xử lý an toàn. Đây là quy tắc bất di bất dịch khi viết raw SQL, bất kể dùng ORM nào.
 - type: callout
   variant: info
   content: |
-    **Tránh "N+1 query".** Nếu với mỗi bài tìm được lại gọi DB một lần để lấy tag, 20 bài = 21 lần gọi DB (1 + N). Ở đây ta gom: lấy hết tag của 20 bài trong **một** query `where articleId in [...]`, rồi map lại trong bộ nhớ. N+1 là một trong những lỗi hiệu năng phổ biến nhất ở backend.
+    **Tránh "N+1 query".** Nếu với mỗi bài tìm được lại gọi DB một lần để lấy tag, 20 bài = 21 lần gọi DB (1 + N). `loadTagsForArticles` (viết ở bước 3.3) gom hết tag của N bài trong **một** query `inArray(articleId, [...])`, rồi map lại trong bộ nhớ — dùng lại được ở mọi nơi cần tags theo batch, không riêng gì search. N+1 là một trong những lỗi hiệu năng phổ biến nhất ở backend.
 - type: command
   label: Test + lưu mốc bước 3.5 — kết thúc Chặng 3
   content: |
@@ -99,5 +88,5 @@ blocks:
     git add api/src && git commit -m "[step-3.5] Search PG-FTS + mount đầy đủ"
 - type: resource
   label: Commit đối chiếu (step-3.5)
-  url: https://github.com/KouTaru99/mini-wiki/commit/b4bd4ec
+  url: https://github.com/KouTaru99/mini-wiki/commit/b928882
   kind: docs

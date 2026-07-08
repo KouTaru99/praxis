@@ -2,9 +2,9 @@ id: be-03
 title: Viết CRUD API cho Bài viết
 order: 3
 est_minutes: 50
-commit_ref: 5e7ee9c
+commit_ref: 83d1949
 goal: Viết 5 endpoint CRUD cho Bài viết, kèm tự sinh slug và render Markdown an toàn (chống XSS).
-deliverable: api/src/controllers/articles.controller.ts + routes + 2 helper (slug, markdown); 5 endpoint hoạt động.
+deliverable: api/src/controllers/articles.controller.ts + routes + 3 helper (slug, markdown, articleTags); 5 endpoint hoạt động.
 outcome_preview: Bạn sẽ gọi được POST /api/articles tạo bài mới và GET /api/articles/:slug nhận về JSON kèm HTML đã render an toàn.
 blocks:
 - type: prose
@@ -44,34 +44,61 @@ blocks:
     }
 - type: prose
   content: |
-    Giờ tới controller — chứa logic 5 endpoint. Lưu ý cách `formatArticle` (có content) và `formatListItem` (không content, cho danh sách) khác nhau, đúng hợp đồng API ở Chặng 1:
+    Trước khi vào controller: Prisma có `include: { tags: { include: { tag: true } } }` để tự lấy tag lồng theo bài viết. Drizzle **không có include tự động** — đây là đánh đổi có chủ đích của ADR-004 (tường minh hơn, lộ rõ N+1 query là gì). Ta viết 1 helper batch-query dùng chung:
+- type: code
+  filename: api/src/lib/articleTags.ts
+  lang: typescript
+  content: |
+    import { eq, inArray } from 'drizzle-orm';
+    import { db } from './db.js';
+    import { articleTags, tags } from '../db/schema.js';
+
+    export type TagSummary = { id: number; name: string; slug: string };
+
+    // Batch-load tags cho nhiều article cùng lúc — tránh N+1 query.
+    export async function loadTagsForArticles(articleIds: number[]): Promise<Map<number, TagSummary[]>> {
+      const tagMap = new Map<number, TagSummary[]>();
+      if (articleIds.length === 0) return tagMap;
+      const rows = await db
+        .select({ articleId: articleTags.articleId, id: tags.id, name: tags.name, slug: tags.slug })
+        .from(articleTags)
+        .innerJoin(tags, eq(articleTags.tagId, tags.id))
+        .where(inArray(articleTags.articleId, articleIds));
+      for (const row of rows) {
+        const list = tagMap.get(row.articleId) ?? [];
+        list.push({ id: row.id, name: row.name, slug: row.slug });
+        tagMap.set(row.articleId, list);
+      }
+      return tagMap;
+    }
+- type: prose
+  content: |
+    Giờ tới controller — chứa logic 5 endpoint. Lưu ý cách `formatArticle` (có content) và `formatListItem` (không content, cho danh sách) khác nhau, đúng hợp đồng API ở Chặng 1. `create`/`update` bọc trong `db.transaction()` — thay cho nested-write ngầm định của Prisma, để đảm bảo bài viết + liên kết tag cùng thành công hoặc cùng rollback:
 - type: code
   filename: api/src/controllers/articles.controller.ts
   lang: typescript
   content: |
     import type { Request, Response } from 'express';
-    import { Prisma } from '@prisma/client';
+    import { count, desc, eq, inArray, sql } from 'drizzle-orm';
     import { AppError } from '../middleware/errorHandler.js';
-    import { prisma } from '../lib/prisma.js';
+    import { db } from '../lib/db.js';
+    import { articles, articleTags, tags } from '../db/schema.js';
+    import { loadTagsForArticles, type TagSummary } from '../lib/articleTags.js';
     import { toSlug } from '../lib/slug.js';
     import { renderMarkdown } from '../lib/markdown.js';
 
-    const ARTICLE_INCLUDE = { tags: { include: { tag: true } } } as const;
-    type ArticleWithTags = Prisma.ArticleGetPayload<{ include: typeof ARTICLE_INCLUDE }>;
+    type ArticleRow = typeof articles.$inferSelect;
 
-    const mapTags = (tags: ArticleWithTags['tags']) =>
-      tags.map((at) => ({ id: at.tag.id, name: at.tag.name, slug: at.tag.slug }));
-
-    function formatArticle(a: ArticleWithTags, contentHtml?: string) {
+    function formatArticle(a: ArticleRow, tagList: TagSummary[], contentHtml?: string) {
       return {
         id: a.id, title: a.title, slug: a.slug, content: a.content,
         ...(contentHtml !== undefined && { content_html: contentHtml }),
         published_at: a.publishedAt, created_at: a.createdAt, updated_at: a.updatedAt,
-        tags: mapTags(a.tags),
+        tags: tagList,
       };
     }
-    const formatListItem = (a: ArticleWithTags) => ({
-      id: a.id, title: a.title, slug: a.slug, published_at: a.publishedAt, tags: mapTags(a.tags),
+    const formatListItem = (a: ArticleRow, tagList: TagSummary[]) => ({
+      id: a.id, title: a.title, slug: a.slug, published_at: a.publishedAt, tags: tagList,
     });
 
     // A1 — GET /api/articles  (danh sách, có lọc tag + phân trang)
@@ -79,26 +106,31 @@ blocks:
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const tagSlug = req.query.tag as string | undefined;
-      const where: Prisma.ArticleWhereInput = tagSlug
-        ? { tags: { some: { tag: { slug: tagSlug } } } } : {};
-      const [total, articles] = await Promise.all([
-        prisma.article.count({ where }),
-        prisma.article.findMany({
-          where,
-          orderBy: [{ publishedAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }],
-          skip: (page - 1) * limit, take: limit, include: ARTICLE_INCLUDE,
-        }),
+      const where = tagSlug
+        ? inArray(articles.id, db.select({ id: articleTags.articleId }).from(articleTags)
+            .innerJoin(tags, eq(articleTags.tagId, tags.id)).where(eq(tags.slug, tagSlug)))
+        : undefined;
+      const [totalRow, rows] = await Promise.all([
+        db.select({ value: count() }).from(articles).where(where),
+        db.select().from(articles).where(where)
+          .orderBy(sql`${articles.publishedAt} DESC NULLS LAST`, desc(articles.id))
+          .limit(limit).offset((page - 1) * limit),
       ]);
-      res.json({ data: articles.map(formatListItem), meta: { total, page, limit } });
+      const tagMap = await loadTagsForArticles(rows.map((r) => r.id));
+      res.json({
+        data: rows.map((a) => formatListItem(a, tagMap.get(a.id) ?? [])),
+        meta: { total: totalRow[0]?.value ?? 0, page, limit },
+      });
     }
 
     // A3 — GET /api/articles/:slug  (chi tiết, kèm HTML đã render)
     export async function getBySlug(req: Request, res: Response) {
       const slug = String(req.params.slug);
-      const article = await prisma.article.findUnique({ where: { slug }, include: ARTICLE_INCLUDE });
+      const [article] = await db.select().from(articles).where(eq(articles.slug, slug)).limit(1);
       if (!article) throw new AppError(404, 'ARTICLE_NOT_FOUND', `Không tìm thấy bài '${slug}'.`);
+      const tagMap = await loadTagsForArticles([article.id]);
       const contentHtml = await renderMarkdown(article.content);
-      res.json(formatArticle(article, contentHtml));
+      res.json(formatArticle(article, tagMap.get(article.id) ?? [], contentHtml));
     }
 
     // A2 — POST /api/articles
@@ -106,42 +138,52 @@ blocks:
       const { title, content, published_at, tagIds } = req.body;
       if (!title?.trim()) throw new AppError(400, 'MISSING_FIELD', "Thiếu 'title'.");
       if (!content?.trim()) throw new AppError(400, 'MISSING_FIELD', "Thiếu 'content'.");
-      const article = await prisma.article.create({
-        data: {
+      const article = await db.transaction(async (tx) => {
+        const [inserted] = await tx.insert(articles).values({
           title, slug: toSlug(title), content,
           publishedAt: published_at ? new Date(published_at) : null,
-          tags: tagIds?.length ? { create: tagIds.map((tagId: number) => ({ tagId })) } : undefined,
-        },
-        include: ARTICLE_INCLUDE,
+        }).returning();
+        if (tagIds?.length) {
+          await tx.insert(articleTags).values(tagIds.map((tagId: number) => ({ articleId: inserted.id, tagId })));
+        }
+        return inserted;
       });
-      res.status(201).json(formatArticle(article));
+      const tagMap = await loadTagsForArticles([article.id]);
+      res.status(201).json(formatArticle(article, tagMap.get(article.id) ?? []));
     }
 
     // A4 — PUT /api/articles/:slug  (mọi trường tùy chọn)
     export async function update(req: Request, res: Response) {
       const slug = String(req.params.slug);
-      const existing = await prisma.article.findUnique({ where: { slug } });
+      const [existing] = await db.select().from(articles).where(eq(articles.slug, slug)).limit(1);
       if (!existing) throw new AppError(404, 'ARTICLE_NOT_FOUND', `Không tìm thấy bài '${slug}'.`);
       const body = req.body;
-      const data: Prisma.ArticleUpdateInput = {};
+      const data: Partial<typeof articles.$inferInsert> = { updatedAt: new Date() };
       if (body.title !== undefined) { data.title = body.title; data.slug = toSlug(body.title); }
       if (body.content !== undefined) data.content = body.content;
       // 'in' để phân biệt "không gửi field" vs "gửi null" (chuyển về bản nháp)
       if ('published_at' in body) data.publishedAt = body.published_at ? new Date(body.published_at) : null;
-      if (body.tagIds !== undefined)
-        data.tags = { deleteMany: {}, create: body.tagIds.map((tagId: number) => ({ tagId })) };
-      const article = await prisma.article.update({
-        where: { id: existing.id }, data, include: ARTICLE_INCLUDE,
+
+      const article = await db.transaction(async (tx) => {
+        const [updated] = await tx.update(articles).set(data).where(eq(articles.id, existing.id)).returning();
+        if (body.tagIds !== undefined) {
+          await tx.delete(articleTags).where(eq(articleTags.articleId, existing.id));
+          if (body.tagIds.length) {
+            await tx.insert(articleTags).values(body.tagIds.map((tagId: number) => ({ articleId: existing.id, tagId })));
+          }
+        }
+        return updated;
       });
-      res.json(formatArticle(article));
+      const tagMap = await loadTagsForArticles([article.id]);
+      res.json(formatArticle(article, tagMap.get(article.id) ?? []));
     }
 
-    // A5 — DELETE /api/articles/:slug  (ArticleTag tự xóa cascade)
+    // A5 — DELETE /api/articles/:slug  (article_tags tự xóa cascade)
     export async function remove(req: Request, res: Response) {
       const slug = String(req.params.slug);
-      const existing = await prisma.article.findUnique({ where: { slug } });
+      const [existing] = await db.select().from(articles).where(eq(articles.slug, slug)).limit(1);
       if (!existing) throw new AppError(404, 'ARTICLE_NOT_FOUND', `Không tìm thấy bài '${slug}'.`);
-      await prisma.article.delete({ where: { id: existing.id } });
+      await db.delete(articles).where(eq(articles.id, existing.id));
       res.status(204).send();
     }
 - type: prose
@@ -185,5 +227,5 @@ blocks:
     git add api/src && git commit -m "[step-3.3] Articles CRUD + slug + markdown an toàn"
 - type: resource
   label: Commit đối chiếu (step-3.3)
-  url: https://github.com/KouTaru99/mini-wiki/commit/5e7ee9c
+  url: https://github.com/KouTaru99/mini-wiki/commit/83d1949
   kind: docs

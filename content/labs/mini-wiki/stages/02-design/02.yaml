@@ -1,107 +1,134 @@
 id: des-02
-title: Thiết kế schema database (Prisma)
+title: Thiết kế schema database (Drizzle)
 order: 2
 est_minutes: 30
-commit_ref: bb888fc
-goal: Biến ERD thành schema Prisma thật + file migration SQL + biến môi trường mẫu.
-deliverable: api/prisma/schema.prisma, migration 0001_init, và api/.env.example.
+commit_ref: a8a9d69
+goal: Biến ERD thành schema Drizzle thật + migration SQL sinh tự động + biến môi trường mẫu.
+deliverable: api/src/db/schema.ts, api/drizzle.config.ts, migration api/drizzle/0000_init.sql, và api/.env.example.
 outcome_preview: Bạn sẽ có một schema database chính thức, type-safe, sẵn sàng để Chặng 3 áp vào PostgreSQL thật.
 blocks:
 - type: prose
   content: |
-    ERD ở Chặng 1 là bản vẽ. Giờ ta biến nó thành **schema Prisma** — một file `.prisma` mô tả toàn bộ database bằng cú pháp ngắn gọn, từ đó Prisma **tự sinh** TypeScript client (type-safe) và file migration SQL.
+    ERD ở Chặng 1 là bản vẽ. Giờ ta biến nó thành **schema Drizzle** — khác các ORM schema-first (như Prisma dùng DSL `.prisma` riêng), Drizzle viết schema bằng **TypeScript thuần**: mỗi bảng là 1 hằng số `pgTable(...)`, import thẳng vào code Express để query — không có bước "sinh client" nào cả, vì bản thân file này đã LÀ client.
 
-    Lưu ý cách Prisma ánh xạ: tên model viết hoa kiểu `Article` nhưng `@@map("articles")` trỏ về tên bảng thật chữ thường. Trường `publishedAt` ánh xạ cột `published_at` qua `@map`.
+    Lưu ý cách đặt tên: biến TypeScript viết camelCase (`publishedAt`) nhưng tham số đầu của mỗi cột là tên cột SQL thật, chữ thường snake_case (`'published_at'`) — tương đương `@map` của Prisma nhưng không cần DSL riêng.
 - type: prose
   content: |
-    Tạo `api/prisma/schema.prisma`:
+    Tạo `api/src/db/schema.ts`:
 - type: code
-  filename: api/prisma/schema.prisma
-  lang: prisma
+  filename: api/src/db/schema.ts
+  lang: typescript
   content: |
-    // Prisma Schema — Mini-Wiki v1
-    // Chạy `prisma generate` sau mỗi lần thay đổi file này.
+    // Drizzle Schema — Mini-Wiki v1
+    // Sau khi sửa file này: chạy `npm run db:generate` để sinh migration SQL.
 
-    generator client {
-      provider = "prisma-client-js"
-    }
+    import { sql } from 'drizzle-orm';
+    import {
+      index, integer, pgTable, primaryKey, serial, text, timestamp, varchar,
+    } from 'drizzle-orm/pg-core';
 
-    datasource db {
-      provider = "postgresql"
-      url      = env("DATABASE_URL")
-    }
+    // ─── articles (Bài viết) ───────────────────────────────
+    export const articles = pgTable(
+      'articles',
+      {
+        id: serial('id').primaryKey(),
+        title: varchar('title', { length: 255 }).notNull(),
+        slug: varchar('slug', { length: 255 }).notNull().unique(),
+        content: text('content').notNull(),
+        publishedAt: timestamp('published_at', { withTimezone: true }),
+        createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+        updatedAt: timestamp('updated_at', { withTimezone: true })
+          .defaultNow()
+          .notNull()
+          .$onUpdate(() => new Date()),
+      },
+      (table) => [
+        index('idx_articles_fts').using(
+          'gin',
+          sql`to_tsvector('simple', ${table.title} || ' ' || ${table.content})`,
+        ),
+      ],
+    );
 
-    // ─── Article (Bài viết) ───────────────────────────────
-    model Article {
-      id          Int          @id @default(autoincrement())
-      title       String       @db.VarChar(255)
-      slug        String       @unique @db.VarChar(255)
-      content     String
-      publishedAt DateTime?    @map("published_at") @db.Timestamptz()
-      createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz()
-      updatedAt   DateTime     @updatedAt @map("updated_at") @db.Timestamptz()
-      tags        ArticleTag[]
+    // ─── tags (Nhãn) ───────────────────────────────────────
+    export const tags = pgTable('tags', {
+      id: serial('id').primaryKey(),
+      name: varchar('name', { length: 100 }).notNull().unique(),
+      slug: varchar('slug', { length: 100 }).notNull().unique(),
+      createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    });
 
-      @@map("articles")
-    }
-
-    // ─── Tag (Nhãn) ───────────────────────────────────────
-    model Tag {
-      id        Int          @id @default(autoincrement())
-      name      String       @unique @db.VarChar(100)
-      slug      String       @unique @db.VarChar(100)
-      createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz()
-      articles  ArticleTag[]
-
-      @@map("tags")
-    }
-
-    // ─── ArticleTag (Bảng nối nhiều-nhiều) ────────────────
-    model ArticleTag {
-      articleId Int     @map("article_id")
-      tagId     Int     @map("tag_id")
-      article   Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
-      tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Restrict)
-
-      @@id([articleId, tagId])
-      @@map("article_tags")
-    }
+    // ─── article_tags (Bảng nối nhiều-nhiều) ────────────────
+    export const articleTags = pgTable(
+      'article_tags',
+      {
+        articleId: integer('article_id')
+          .notNull()
+          .references(() => articles.id, { onDelete: 'cascade' }),
+        tagId: integer('tag_id')
+          .notNull()
+          .references(() => tags.id, { onDelete: 'restrict' }),
+      },
+      (table) => [primaryKey({ columns: [table.articleId, table.tagId] })],
+    );
 - type: prose
   content: |
-    Tạo file migration SQL `api/prisma/migrations/0001_init/migration.sql` — đây là lệnh SQL thật sẽ chạy lên PostgreSQL ở Chặng 3 (chú ý GIN index cho Full-Text Search ở cuối):
+    Tạo `api/drizzle.config.ts` — cấu hình cho Drizzle Kit (công cụ CLI sinh migration từ schema):
 - type: code
-  filename: api/prisma/migrations/0001_init/migration.sql
+  filename: api/drizzle.config.ts
+  lang: typescript
+  content: |
+    import 'dotenv/config';
+    import { defineConfig } from 'drizzle-kit';
+
+    export default defineConfig({
+      out: './drizzle',
+      schema: './src/db/schema.ts',
+      dialect: 'postgresql',
+      dbCredentials: {
+        url: process.env.DATABASE_URL!,
+      },
+    });
+- type: prose
+  content: |
+    Chạy `npx drizzle-kit generate` (sẽ cài ở Chặng 3) sẽ tự đọc diff của `schema.ts` và sinh ra file migration SQL dưới `api/drizzle/`. Đây là kết quả — copy tay vào `api/drizzle/0000_init.sql` để đối chiếu ngay (chú ý GIN index cho Full-Text Search ở cuối, giống hệt bản Prisma cũ — DDL không đổi, chỉ khác cách tạo ra):
+- type: code
+  filename: api/drizzle/0000_init.sql
   lang: sql
   content: |
-    -- Migration 0001_init — Mini-Wiki v1
-
-    CREATE TABLE articles (
-      id           SERIAL        PRIMARY KEY,
-      title        VARCHAR(255)  NOT NULL,
-      slug         VARCHAR(255)  NOT NULL UNIQUE,
-      content      TEXT          NOT NULL,
-      published_at TIMESTAMPTZ,  -- NULL = bản nháp (khớp schema.prisma DateTime?, KHÔNG default)
-      created_at   TIMESTAMPTZ   DEFAULT NOW(),
-      updated_at   TIMESTAMPTZ   DEFAULT NOW()
+    CREATE TABLE "article_tags" (
+    	"article_id" integer NOT NULL,
+    	"tag_id" integer NOT NULL,
+    	CONSTRAINT "article_tags_article_id_tag_id_pk" PRIMARY KEY("article_id","tag_id")
     );
-
-    CREATE TABLE tags (
-      id         SERIAL       PRIMARY KEY,
-      name       VARCHAR(100) NOT NULL UNIQUE,
-      slug       VARCHAR(100) NOT NULL UNIQUE,
-      created_at TIMESTAMPTZ  DEFAULT NOW()
+    --> statement-breakpoint
+    CREATE TABLE "articles" (
+    	"id" serial PRIMARY KEY NOT NULL,
+    	"title" varchar(255) NOT NULL,
+    	"slug" varchar(255) NOT NULL,
+    	"content" text NOT NULL,
+    	"published_at" timestamp with time zone,
+    	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+    	CONSTRAINT "articles_slug_unique" UNIQUE("slug")
     );
-
-    CREATE TABLE article_tags (
-      article_id INT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
-      tag_id     INT NOT NULL REFERENCES tags(id)     ON DELETE RESTRICT,
-      PRIMARY KEY (article_id, tag_id)
+    --> statement-breakpoint
+    CREATE TABLE "tags" (
+    	"id" serial PRIMARY KEY NOT NULL,
+    	"name" varchar(100) NOT NULL,
+    	"slug" varchar(100) NOT NULL,
+    	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    	CONSTRAINT "tags_name_unique" UNIQUE("name"),
+    	CONSTRAINT "tags_slug_unique" UNIQUE("slug")
     );
-
-    -- Index Full-Text Search (GIN) trên title + content, dictionary 'simple'
-    CREATE INDEX idx_articles_fts
-      ON articles
-      USING GIN (to_tsvector('simple', title || ' ' || content));
+    --> statement-breakpoint
+    ALTER TABLE "article_tags" ADD CONSTRAINT "article_tags_article_id_articles_id_fk" FOREIGN KEY ("article_id") REFERENCES "public"."articles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+    ALTER TABLE "article_tags" ADD CONSTRAINT "article_tags_tag_id_tags_id_fk" FOREIGN KEY ("tag_id") REFERENCES "public"."tags"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+    CREATE INDEX "idx_articles_fts" ON "articles" USING gin (to_tsvector('simple', "title" || ' ' || "content"));
+- type: callout
+  variant: info
+  content: |
+    **Tên constraint không phải ngẫu nhiên.** Drizzle đặt tên rõ ràng (`articles_slug_unique`, `tags_name_unique`...) thay vì để Postgres tự sinh tên. Điều này quan trọng ở Chặng 3: khi bắt lỗi trùng slug/tên, code đọc `err.constraint` để phân biệt lỗi nào — tên constraint dễ đoán giúp code đó chính xác.
 - type: prose
   content: |
     Cuối cùng, tạo `api/.env.example` — file mẫu khai báo biến môi trường. File `.env` **thật** (có mật khẩu) đã bị `.gitignore` chặn; ta chỉ commit file `.example` để người khác biết cần điền gì:
@@ -123,13 +150,13 @@ blocks:
 - type: callout
   variant: warning
   content: |
-    **Một bẫy tinh vi: published_at phải nullable, KHÔNG đặt DEFAULT NOW().** Trong schema, ta khai báo `publishedAt DateTime?` (dấu `?` = cho phép NULL). Nếu migration để `DEFAULT NOW()`, mọi bài tạo ra sẽ tự "đã đăng" ngay — phá vỡ tính năng *bản nháp* (FR-3: bài nháp có `published_at` = NULL). Schema và migration phải **khớp nhau**, nếu lệch sẽ sinh bug khó tìm.
+    **Một bẫy tinh vi: published_at phải nullable, KHÔNG đặt `.defaultNow()`.** Trong schema, cột `publishedAt` KHÔNG gọi `.notNull()` (mặc định Drizzle = cho phép NULL). Nếu lỡ thêm `.defaultNow()`, mọi bài tạo ra sẽ tự "đã đăng" ngay — phá vỡ tính năng *bản nháp* (FR-3: bài nháp có `published_at` = NULL). So sánh với `createdAt`/`updatedAt` ngay bên trên: cả hai đều có `.defaultNow().notNull()`, còn `publishedAt` thì không — sự khác biệt này **có chủ đích**.
 - type: command
   label: Lưu mốc bước 2.2
   content: |
-    git add api/prisma api/.env.example
-    git commit -m "[step-2.2] Prisma schema + migration 0001_init + .env.example"
+    git add api/src/db/schema.ts api/drizzle.config.ts api/drizzle api/.env.example
+    git commit -m "[step-2.2] Drizzle schema + migration 0000_init + .env.example"
 - type: resource
   label: Commit đối chiếu (step-2.2)
-  url: https://github.com/KouTaru99/mini-wiki/commit/bb888fc
+  url: https://github.com/KouTaru99/mini-wiki/commit/a8a9d69
   kind: docs

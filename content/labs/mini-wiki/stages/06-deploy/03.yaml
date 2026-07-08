@@ -2,7 +2,7 @@ id: dep-03
 title: README & Production Checklist (trung thực)
 order: 3
 est_minutes: 30
-commit_ref: b62a2d5
+commit_ref: ad5de5a
 goal: Hoàn thiện README hướng dẫn chạy + một production checklist trung thực (ghi rõ cả cái CHƯA làm).
 deliverable: README.md đầy đủ + docs/production-checklist.md (6 đã làm / 2 cần thêm / 4 chưa có).
 outcome_preview: Bạn sẽ có một dự án hoàn chỉnh, tài liệu rõ ràng, và một checklist thành thật về mức độ sẵn-sàng-production.
@@ -30,7 +30,7 @@ blocks:
     | 5 | Authentication/Authorization | ❌ Chưa có | v1 là public (đọc/ghi tự do); auth = lab riêng |
 
     ## Cơ sở dữ liệu
-    | 6 | Migration tự động khi khởi động | ✅ Đã làm | Dockerfile chạy prisma migrate deploy |
+    | 6 | Migration tự động khi khởi động | ✅ Đã làm | Dockerfile chạy node dist/db/migrate.js (Drizzle) |
     | 7 | Healthcheck DB trước khi api start | ✅ Đã làm | compose: condition service_healthy |
     | 8 | Backup định kỳ (pg_dump) | ❌ Chưa có | Production: pg_dump theo cron, hoặc managed DB có backup sẵn |
 
@@ -60,5 +60,5 @@ blocks:
     # 22/22 commit [step-X.Y] — Lab Mini-Wiki hoàn tất!
 - type: resource
   label: Commit đối chiếu — README + checklist đầy đủ (step-6.3)
-  url: https://github.com/KouTaru99/mini-wiki/commit/b62a2d5
+  url: https://github.com/KouTaru99/mini-wiki/commit/ad5de5a
   kind: docs

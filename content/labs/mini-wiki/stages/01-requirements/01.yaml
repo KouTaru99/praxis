@@ -2,7 +2,7 @@ id: req-01
 title: Khởi tạo dự án & viết Đặc tả Yêu cầu
 order: 1
 est_minutes: 30
-commit_ref: faf4caa
+commit_ref: 2e6a8f6
 goal: Khởi tạo repo và viết tài liệu yêu cầu (requirements) — nền móng của mọi dự án phần mềm.
 deliverable: Một repo git mới có README, .gitignore và docs/requirements.md (15 FR + 8 NFR + 9 user story).
 outcome_preview: Sau bước này, bạn có một repo sạch và một bản đặc tả rõ ràng "phần mềm này phải làm được gì" — kim chỉ nam cho mọi bước sau.
@@ -110,11 +110,11 @@ blocks:
     |---|---|
     | NFR-1 | Hiệu năng: CRUD đơn lẻ dưới 300ms local; FTS dưới 500ms nhờ GIN index. |
     | NFR-2 | Bảo mật XSS: sanitize mọi Markdown; chặn script, event handler, iframe lạ. |
-    | NFR-3 | Bảo mật SQL Injection: mọi truy vấn qua Prisma ORM (parameterized query). |
+    | NFR-3 | Bảo mật SQL Injection: mọi truy vấn qua Drizzle ORM (parameterized query). |
     | NFR-4 | CORS: API chỉ chấp nhận origin của front-end (qua CORS_ORIGIN). |
     | NFR-5 | Không xác thực (v1): không đăng ký/đăng nhập; nội dung công khai. |
     | NFR-6 | Khả năng triển khai: container hóa bằng Docker; dev = prod (parity). |
-    | NFR-7 | Bảo trì: TypeScript strict; Prisma migration version hóa; không lạm dụng any. |
+    | NFR-7 | Bảo trì: TypeScript strict; Drizzle migration version hóa; không lạm dụng any. |
     | NFR-8 | Quan sát: mọi lỗi 5xx log ra stderr đủ context; không nuốt lỗi thầm. |
 
     ## 3. User Stories
@@ -147,5 +147,5 @@ blocks:
     git commit -m "[step-1.1] init project, requirements + user stories, .gitignore"
 - type: resource
   label: Commit đối chiếu trên repo mẫu (step-1.1)
-  url: https://github.com/KouTaru99/mini-wiki/commit/faf4caa
+  url: https://github.com/KouTaru99/mini-wiki/commit/2e6a8f6
   kind: docs

@@ -2,7 +2,7 @@ id: dep-01
 title: Đóng gói Docker (api + web + db)
 order: 1
 est_minutes: 40
-commit_ref: 1252e9b
+commit_ref: 56ead5c
 goal: Viết Dockerfile multi-stage cho api và web, gom cả 3 service vào một docker-compose chạy được.
 deliverable: api/Dockerfile + web/Dockerfile + nginx.conf + docker-compose.yml đầy đủ.
 outcome_preview: Bạn sẽ chạy docker compose up và thấy cả 3 service (db, api, web) lên cùng lúc, app chạy production-like.
@@ -11,43 +11,32 @@ blocks:
   content: |
     Chặng cuối: **đóng gói** để app chạy được ở bất kỳ máy nào có Docker — không cần cài Node, Postgres thủ công. Ta dùng **multi-stage build**: stage đầu build (cần devDeps), stage sau chỉ giữ thứ cần để chạy → image nhỏ, gọn.
 
-    Dockerfile cho **api** — chú ý 2 bẫy đã được giải sẵn trong comment (OpenSSL cho Prisma, và migrate-on-start):
+    Dockerfile cho **api** — đây chính là điểm mấu chốt giải quyết vấn đề gốc của ADR-004. Bản Prisma trước đây cần cài OpenSSL (Prisma engine cần chọn đúng libssl) và chạy `prisma generate` — bước này gọi mạng ra `binaries.prisma.sh`, domain hay bị proxy công ty chặn 403. Bản Drizzle: **không cần OpenSSL** (`pg` dùng module `tls` built-in của Node, không phải native binary rời) và **không có bước generate nào cả** — build image không còn gọi ra domain lạ nào nữa:
 - type: code
   filename: api/Dockerfile
   lang: dockerfile
   content: |
-    # ── Stage 1: BUILD (cần devDeps để chạy tsc + prisma generate) ──
+    # ── Stage 1: BUILD (cần devDeps để chạy tsc) ──
     FROM node:22-slim AS build
     WORKDIR /app
 
-    # Prisma cần OpenSSL để chọn query engine. node:22-slim (debian) KHÔNG có sẵn
-    # -> phải cài, nếu không sẽ lỗi "failed to detect libssl".
-    RUN apt-get update -y && apt-get install -y --no-install-recommends openssl \
-      && rm -rf /var/lib/apt/lists/*
-
     COPY package*.json ./
-    COPY prisma/ ./prisma/
     RUN npm ci
     COPY tsconfig.json ./
     COPY src/ ./src/
-    RUN npx prisma generate
     RUN npm run build          # tsc -> dist/
 
     # ── Stage 2: RUNTIME (chỉ production deps, không source TS) ──
     FROM node:22-slim
     WORKDIR /app
-    RUN apt-get update -y && apt-get install -y --no-install-recommends openssl \
-      && rm -rf /var/lib/apt/lists/*
     COPY package*.json ./
-    COPY prisma/ ./prisma/
     RUN npm ci --omit=dev
     COPY --from=build /app/dist ./dist
-    COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
-    COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
+    COPY drizzle/ ./drizzle/    # migration SQL — migrate.js đọc lúc khởi động
     ENV NODE_ENV=production
     EXPOSE 3000
     # Áp migration RỒI mới start server (an toàn cho production)
-    CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+    CMD ["sh", "-c", "node dist/db/migrate.js && node dist/index.js"]
 - type: prose
   content: |
     Dockerfile cho **web** khác hẳn: Vite "bake" biến môi trường *lúc build* vào bundle, sau đó chỉ cần `nginx` phục vụ file tĩnh — image cuối không cần Node:
@@ -127,9 +116,13 @@ blocks:
     volumes:
       pgdata:
 - type: callout
-  variant: warning
+  variant: tip
   content: |
-    **Hai bẫy Docker kinh điển ở đây.** (1) `node:22-slim` (Debian) **thiếu OpenSSL** mà Prisma cần — không cài thì lỗi "failed to detect libssl" ở cả 2 stage. (2) `prisma` là **runtime dependency** khi ta migrate-on-start, nên không được nằm trong devDeps — `npm ci --omit=dev` sẽ thiếu CLI. Cả hai chỉ lộ ra khi *build image thật*, không phải khi chạy dev — lý do nữa để luôn kiểm bằng Docker.
+    **Cách verify "đã hết phụ thuộc domain lạ" thật sự, không chỉ đọc code.** Giả lập đúng kịch bản mạng công ty chặn bằng cách trỏ domain nghi ngờ về localhost, rồi build:
+    ```bash
+    docker build --add-host=binaries.prisma.sh:127.0.0.1 -t test ./api
+    ```
+    Nếu build vẫn qua trót lọt (không có gì gọi tới domain đó) — bạn vừa chứng minh được, chứ không chỉ tin, rằng image không còn phụ thuộc nào vào `binaries.prisma.sh` nữa.
 - type: callout
   variant: info
   content: |
@@ -142,5 +135,5 @@ blocks:
     git add . && git commit -m "[step-6.1] Đóng gói Docker: Dockerfile api+web + compose full"
 - type: resource
   label: Commit đối chiếu (step-6.1)
-  url: https://github.com/KouTaru99/mini-wiki/commit/1252e9b
+  url: https://github.com/KouTaru99/mini-wiki/commit/56ead5c
   kind: docs

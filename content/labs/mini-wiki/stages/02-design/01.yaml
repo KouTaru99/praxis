@@ -2,10 +2,10 @@ id: des-01
 title: Viết ADR chọn techstack
 order: 1
 est_minutes: 25
-commit_ref: 3f59dd2
+commit_ref: ca9a554
 goal: Ghi lại các quyết định công nghệ quan trọng kèm lý do — đúng cách kỹ sư thật làm.
-deliverable: 3 file ADR (ADR-001 techstack, ADR-002 Prisma, ADR-003 PostgreSQL) trong docs/adr/.
-outcome_preview: Bạn sẽ tập thói quen ghi "vì sao chọn X chứ không phải Y" — tài sản giúp người sau hiểu bối cảnh quyết định.
+deliverable: 4 file ADR (ADR-001 techstack, ADR-002 ORM ban đầu — nay Superseded, ADR-003 PostgreSQL, ADR-004 đổi ORM) trong docs/adr/.
+outcome_preview: Bạn sẽ tập thói quen ghi "vì sao chọn X chứ không phải Y" — và học luôn cách xử lý khi 1 quyết định cần đảo ngược sau khi đã triển khai thật.
 blocks:
 - type: prose
   content: |
@@ -56,20 +56,80 @@ blocks:
     Đánh đổi: Node single-thread (không hợp tác vụ nặng CPU); Express ít opinionated (tự tổ chức folder); React SPA yếu SEO (chấp nhận, v1 không ưu tiên SEO).
 - type: prose
   content: |
-    Tạo thêm 2 ADR ngắn cho **Prisma** (ADR-002) và **PostgreSQL** (ADR-003). Cốt lõi mỗi quyết định:
+    Tạo thêm 1 ADR ngắn cho **PostgreSQL** (ADR-003):
 
-    - **ADR-002 — Prisma 5 (ORM):** chọn vì schema-first (1 file `schema.prisma` mô tả toàn bộ DB), migration được git-track, và client TypeScript tự sinh nên type-safe 100%. Đánh đổi: phải nhớ chạy `prisma generate` sau mỗi lần đổi schema; query phức tạp đôi khi cần `$queryRaw`.
     - **ADR-003 — PostgreSQL 16 (database):** chọn vì có **Full-Text Search built-in** (GIN index, không cần Elasticsearch) và constraint mạnh (UNIQUE, FK, CASCADE/RESTRICT) đảm bảo toàn vẹn ngay ở tầng DB. Đánh đổi: nặng hơn SQLite, nhưng Docker Compose đã lo việc setup.
 - type: callout
   variant: info
   content: |
     **Vì sao loại Spring Boot dù nó phổ biến ở doanh nghiệp Việt Nam?** Không phải vì nó kém — mà vì **mục tiêu bài học**. Spring Boot kéo theo cả hệ sinh thái JVM (Gradle/Maven, annotation, cấu hình) làm người mới khó thấy "HTTP thực sự chạy thế nào". Express tối giản hơn, lộ rõ cơ chế. ADR ghi rõ lựa chọn này để người đọc hiểu đây là quyết định *có chủ đích theo ngữ cảnh*, không phải bỏ sót.
+- type: prose
+  content: |
+    Còn 1 quyết định nữa: chọn ORM (Object-Relational Mapper — ánh xạ đối tượng-quan hệ) cho tầng truy cập database. Đây là câu chuyện **có thật, xảy ra ngay trong quá trình xây Lab này** — và nó dạy một bài học ADR quan trọng hơn cả việc "chọn công nghệ nào": **cách ghi lại khi phải đảo ngược một quyết định.**
+
+    Lựa chọn ban đầu là **Prisma 5**: schema-first (1 file `schema.prisma` mô tả toàn bộ DB), migration git-track, client TypeScript tự sinh type-safe 100%. Nghe hợp lý — cho tới khi đem chạy trong mạng doanh nghiệp thật.
+- type: callout
+  variant: warning
+  content: |
+    **Sự cố thật:** Prisma có 1 phần lõi viết bằng Rust, biên dịch thành **native binary riêng** (query-engine + schema-engine), tải về từ domain `binaries.prisma.sh` — **không đi qua npm registry**. Domain này không nằm trong nhóm "quen mặt" (npm, Docker Hub, GitHub) nên proxy nhiều công ty theo mô hình allowlist chặn thẳng bằng 403 — dù các nguồn khác vẫn thông bình thường. Learner nào chạy Lab trong mạng như vậy sẽ thấy `prisma generate` crash ngay từ Chặng 3.
+- type: prose
+  content: |
+    Đây **không phải lỗi cấu hình vá được dứt điểm** — kể cả Prisma 7 (bản mới nhất) vẫn giữ native binary cho schema-engine. Kỹ sư giỏi không chỉ sửa lỗi trước mắt, mà đánh giá lại: *"vấn đề này có lặp lại không, và có công cụ nào loại bỏ hẳn được nó?"* Câu trả lời: đổi sang **Drizzle ORM** — 100% TypeScript, không native binary nào phải tải.
+
+    Việc ghi ADR không dừng ở "viết 1 lần rồi thôi". Khi quyết định bị đảo ngược:
+    1. **KHÔNG xóa ADR cũ** — sửa `## Trạng thái` thành `Superseded`, kèm 1 dòng trỏ tới ADR thay thế. ADR cũ vẫn là hồ sơ lịch sử thật.
+    2. **Viết ADR mới** ghi rõ Context (sự cố gì), Options (đã cân nhắc gì), Decision, Consequences — y hệt cấu trúc ADR-001 ở trên.
+
+    Copy nội dung dưới vào `docs/adr/ADR-004-migrate-drizzle.md` (bản rút gọn — đối chiếu bản đầy đủ ở commit cuối bước):
+- type: code
+  filename: docs/adr/ADR-004-migrate-drizzle.md
+  lang: markdown
+  content: |
+    # ADR-004 — Đổi ORM từ Prisma sang Drizzle
+
+    ## Trạng thái
+    Accepted — thay thế (supersedes) ADR-002
+
+    ## Bối cảnh (Context)
+    Mạng doanh nghiệp (proxy allowlist theo domain) chặn `binaries.prisma.sh`
+    — nơi Prisma tải native query/schema engine — dù npm/Docker Hub/GitHub
+    vẫn thông. Đây là thuộc tính cố hữu của Prisma, không phải lỗi cấu hình.
+
+    ## Quyết định (Decision)
+    Chuyển sang Drizzle ORM: 100% TypeScript, không native binary nào cần
+    tải, không bước "generate client" riêng. Giữ nguyên schema-as-code +
+    type-safety như tinh thần ADR-002 ban đầu.
+
+    ## Hệ quả (Consequences)
+    Tích cực: loại bỏ hẳn lớp rủi ro mạng công ty; Dockerfile đơn giản hơn
+    (bỏ cài OpenSSL, bỏ bước generate).
+    Đánh đổi: không có `include` lồng nhau tự động như Prisma — quan hệ
+    nhiều-nhiều phải tự viết batch-query; hệ sinh thái/tooling nhỏ hơn.
+- type: prose
+  content: |
+    Cuối cùng, mở lại `docs/adr/ADR-002-orm-prisma.md` và sửa đúng 1 dòng đầu:
+- type: code
+  filename: docs/adr/ADR-002-orm-prisma.md (chỉ sửa dòng Trạng thái)
+  lang: markdown
+  content: |
+    ## Trạng thái
+
+    **⚠️ Superseded** — bởi ADR-004 (đổi sang Drizzle ORM: Prisma cần tải
+    native binary từ domain riêng, bị proxy mạng doanh nghiệp chặn). Nội
+    dung bên dưới giữ nguyên làm hồ sơ quyết định gốc, không còn phản ánh
+    trạng thái hiện tại của dự án.
+
+    ~~Accepted — 2026-06-28~~
+- type: callout
+  variant: tip
+  content: |
+    **Vì sao không xóa ADR-002 rồi viết lại cho gọn?** Vì ADR không phải tài liệu mô tả *hiện trạng* — nó là **nhật ký quyết định**. Xóa ADR-002 nghĩa là xóa luôn bằng chứng "lúc đó nhóm đã cân nhắc kỹ, chọn Prisma có lý do, và Lab **thật sự chạy** với Prisma một thời gian trước khi đổi". Sáu tháng sau, ADR-002 (Superseded) + ADR-004 kể trọn câu chuyện; xóa đi thì mất dấu vết.
 - type: command
   label: Lưu mốc bước 2.1
   content: |
     git add docs/adr
-    git commit -m "[step-2.1] ADR-001/002/003 — quyết định techstack"
+    git commit -m "[step-2.1] ADR-001/003 — quyết định techstack + ADR-004 đổi ORM"
 - type: resource
   label: Commit đối chiếu — bản ADR đầy đủ (step-2.1)
-  url: https://github.com/KouTaru99/mini-wiki/commit/3f59dd2
+  url: https://github.com/KouTaru99/mini-wiki/commit/ca9a554
   kind: docs

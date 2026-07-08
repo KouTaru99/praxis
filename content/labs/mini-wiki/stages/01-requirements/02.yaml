@@ -2,7 +2,7 @@ id: req-02
 title: Thiết kế sơ đồ thực thể (ERD)
 order: 2
 est_minutes: 25
-commit_ref: 851ce22
+commit_ref: bf767ad
 goal: Thiết kế cấu trúc dữ liệu — có những bảng nào, cột gì, nối nhau ra sao.
 deliverable: docs/erd.md với sơ đồ Mermaid 3 bảng (articles, tags, article_tags) + giải thích ràng buộc.
 outcome_preview: Bạn sẽ thấy rõ Bài viết và Tag liên kết nhau kiểu nhiều-nhiều qua một bảng nối, trước khi đụng tới database thật.
@@ -60,7 +60,7 @@ blocks:
     | content | TEXT | NOT NULL | Nội dung Markdown thuần |
     | published_at | TIMESTAMPTZ | NULLABLE | NULL = bản nháp; có giá trị = đã đăng |
     | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Tự ghi khi tạo |
-    | updated_at | TIMESTAMPTZ | NOT NULL | Tự cập nhật khi sửa (Prisma @updatedAt) |
+    | updated_at | TIMESTAMPTZ | NOT NULL | Tự cập nhật khi sửa (Drizzle $onUpdate) |
 
     Vì sao slug UNIQUE: slug dùng trong URL (/articles/:slug). Hai bài cùng slug gây xung đột routing, phải chặn ngay ở tầng DB.
 
@@ -112,5 +112,5 @@ blocks:
     git commit -m "[step-1.2] ERD diagram (Mermaid) trong docs/erd.md"
 - type: resource
   label: Commit đối chiếu trên repo mẫu (step-1.2)
-  url: https://github.com/KouTaru99/mini-wiki/commit/851ce22
+  url: https://github.com/KouTaru99/mini-wiki/commit/bf767ad
   kind: docs
