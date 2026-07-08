@@ -1,0 +1,85 @@
+id: mf-09
+title: 'Milestone Chặng 3: smoke-test 4 ca + chạy thật cả live lẫn replay'
+order: 9
+est_minutes: 30
+commit_ref: 2440527
+goal: 'Chạy market-feed thật (Docker), verify bằng 4 ca smoke-test khách quan — không chỉ đọc log bằng mắt. Đây là mốc đóng Chặng 3: dữ liệu Binance thật đã chảy được vào RabbitMQ.'
+deliverable: scripts/smoke-ch3.sh (4 ca) + docs/smoke-ch3.md.
+outcome_preview: '4/4 PASS — market-feed container healthy, log có "First trade received", RabbitMQ nhận trade thật, đúng schema TradeEvent.'
+blocks:
+- type: prose
+  content: |
+    Chạy thử tay ("thấy log chạy là chắc ổn") không phải verify — nó chủ quan và không lặp lại được. Milestone mỗi chặng của lab này đều đóng bằng một smoke-test **khách quan**: script tự động, có tiêu chí PASS/FAIL rõ ràng, chạy lại được bất cứ lúc nào.
+- type: command
+  label: Bật stack + chạy smoke
+  content: |
+    docker compose -f infra/docker-compose.yml --env-file infra/.env --profile feed up -d --build
+    # chờ market-feed healthy (~20s)
+    bash scripts/smoke-ch3.sh
+- type: code
+  filename: scripts/smoke-ch3.sh (trích 2 ca cốt lõi)
+  lang: bash
+  content: |
+    # TC1: market-feed container healthy
+    health=$(docker inspect -f '{{.State.Health.Status}}' "${MF_CID}" 2>/dev/null || echo "missing")
+    check "TC1  market-feed container healthy       → healthy" "$health" "healthy"
+
+    # TC3+TC4: bind 1 queue tạm vào exchange, GET THẬT (không đọc field 'messages'
+    # của management API — field đó lấy mẫu ~5s/lần nên có độ trễ, dễ báo 0 sai)
+    curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X PUT "${RMQ_API}/queues/%2F/${VQUEUE}" \
+        -H "content-type: application/json" -d '{"durable":false}' >/dev/null 2>&1
+    curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/bindings/%2F/e/${EXCHANGE}/q/${VQUEUE}" \
+        -H "content-type: application/json" -d '{}' >/dev/null 2>&1
+    sleep 8
+    get_json=$(curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/queues/%2F/${VQUEUE}/get" \
+        -H "content-type: application/json" \
+        -d '{"count":10,"ackmode":"ack_requeue_true","encoding":"auto"}')
+- type: prose
+  content: '4 ca kiểm, mỗi ca kiểm đúng 1 tầng của hệ thống:'
+- type: code
+  filename: (bảng tham khảo — không phải file thật)
+  lang: markdown
+  content: |
+    | Ca  | Kiểm                       | Kỳ vọng                                          |
+    |-----|-----------------------------|---------------------------------------------------|
+    | TC1 | `market-feed` container    | `healthy`                                         |
+    | TC2 | Log service                | có dòng "First trade received" (Binance live ≤10s)|
+    | TC3 | Trade chảy vào exchange    | bind queue tạm → GET có ≥1 message                |
+    | TC4 | Định dạng message          | JSON đúng schema TradeEvent (symbol/price/tradeId)|
+- type: callout
+  variant: warning
+  content: '**Nếu TC2 fail vì không nối được `stream.binance.com` (mạng chặn domain sàn crypto) — đây là lúc dùng `replay`, không phải lỗi cần sửa code.** Nhờ đồng nghiệp/máy khác (mạng mở) record một đoạn ngắn rồi gửi file `.ndjson` cho bạn, hoặc tự record khi có mạng mở, sau đó:
+
+    ```bash
+    FEED_MODE=replay REPLAY_FILE=/data/trades-BTCUSDT-<ngày>.ndjson REPLAY_MULTIPLIER=10 \
+      docker compose -f infra/docker-compose.yml --env-file infra/.env --profile feed up -d
+    ```
+
+    Chạy lại `smoke-ch3.sh` — TC2/TC3/TC4 vẫn PASS bình thường, vì `ReplayFeed` publish qua đúng `TradePublisher` như `LiveFeed`, chỉ khác nguồn dữ liệu. Đây chính là lý do Chặng 3 thiết kế 3 chế độ ngay từ đầu (bước 3.1) thay vì chỉ làm `live` rồi tính sau.'
+- type: callout
+  variant: tip
+  content: '**Muốn tự tạo file replay của riêng bạn?** Chạy `FEED_MODE=record` khi mạng còn mở, đợi 30-60 giây cho đủ trade, rồi dừng — file NDJSON nằm trong volume `market-feed-data`, dùng lại được vô hạn lần sau này, kể cả khi ngắt hẳn mạng.'
+- type: prose
+  content: 'Kết quả mong đợi:'
+- type: code
+  filename: (output thật)
+  lang: text
+  content: |
+    === Smoke test Chặng 3 — market-feed live → RabbitMQ ===
+
+    PASS  TC1  market-feed container healthy       → healthy
+    PASS  TC2  log 'First trade received' (Binance) → yes
+    PASS  TC3  trade landing exchange (>0 message)  → yes  [7 msg]
+    PASS  TC4  message đúng schema TradeEvent       → ok
+
+    === Kết quả: PASS=4  FAIL=0 ===
+    PASS  Chặng 3 milestone — market-feed live feed hoạt động đúng
+- type: command
+  label: Lưu mốc bước 3.9 — kết thúc Chặng 3
+  content: |
+    git add docs/smoke-ch3.md scripts/smoke-ch3.sh
+    git commit -m "[step-3.9] smoke-ch3.sh: 4 ca (healthy/log-trade/exchange-landing/schema) + docs — milestone Chặng 3"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-3.9)
+  url: https://github.com/KouTaru99/market-pulse/commit/2440527

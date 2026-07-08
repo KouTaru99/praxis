@@ -1,0 +1,136 @@
+id: mf-05
+title: 'market-feed: tách BinanceWsClient dùng chung + RecordFeed ghi NDJSON'
+order: 5
+est_minutes: 30
+commit_ref: 594b864
+goal: 'Tách phần "nối WebSocket + tự hồi phục" ra khỏi LiveFeed thành BinanceWsClient dùng chung, rồi viết RecordFeed: vừa live vừa ghi lại mọi trade ra file.'
+deliverable: BinanceWsClient (refactor từ LiveFeed) + RecordFeed (ghi NDJSON theo ngày).
+outcome_preview: 'Chạy FEED_MODE=record một lúc, bạn sẽ có file trades-BTCUSDT-<ngày>.ndjson trong volume — nguyên liệu cho chế độ replay ở bước sau.'
+blocks:
+- type: prose
+  content: |
+    Bước trước, toàn bộ logic "mở WS, tự hồi phục" nằm cứng trong `LiveFeed`. Giờ cần một chế độ THỨ HAI (`record`) dùng lại y hệt logic đó — chỉ khác ở chỗ mỗi trade nhận được còn được ghi ra file. Thay vì copy-paste, tách phần dùng chung ra một class riêng: **`BinanceWsClient`**.
+
+    Đây là một khoảnh khắc refactor kinh điển: *"2 chỗ cần cùng 1 hành vi → rút ra thành 1 nơi, mỗi nơi chỉ khai báo phần khác biệt."* `LiveFeed` sau khi tách chỉ còn vài dòng — nó chỉ còn việc gọi `wsClient.start(publisher::publish)`.
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/binance/BinanceWsClient.java
+  lang: java
+  content: |
+    /**
+     * Reusable Binance combined-stream WebSocket client with auto-reconnect.
+     * Call start(callback) to open the connection; stop() to close it cleanly.
+     * Shared by LiveFeed (publish only) and RecordFeed (publish + write NDJSON).
+     */
+    @Component
+    public class BinanceWsClient {
+
+        private final FeedProperties feedProperties;
+        private final BinanceTradeMapper mapper;
+        // ... OkHttpClient, scheduler, reconnect state — y hệt LiveFeed cũ ...
+
+        public void start(Consumer<TradeEvent> onTrade) {
+            this.tradeConsumer = onTrade;
+            running = true;
+            connect();
+        }
+
+        public void stop() { /* đóng WS, tắt scheduler */ }
+
+        private class Listener extends WebSocketListener {
+            @Override
+            public void onMessage(WebSocket webSocket, String text) {
+                mapper.map(text).ifPresent(event -> {
+                    if (firstTradeLogged.compareAndSet(false, true)) {
+                        log.info("First trade received: symbol={} price={}", event.symbol(), event.price());
+                    }
+                    tradeConsumer.accept(event);   // khác LiveFeed cũ: gọi callback, không publish thẳng
+                });
+            }
+            // onOpen/onFailure/onClosed giữ nguyên logic reconnect
+        }
+    }
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/feed/LiveFeed.java (sau refactor)
+  lang: java
+  content: |
+    @Component
+    @ConditionalOnProperty(name = "feed.mode", havingValue = "live")
+    public class LiveFeed {
+
+        private final BinanceWsClient wsClient;
+        private final TradePublisher publisher;
+
+        public LiveFeed(BinanceWsClient wsClient, TradePublisher publisher) {
+            this.wsClient = wsClient;
+            this.publisher = publisher;
+        }
+
+        public void start() {
+            wsClient.start(publisher::publish);
+        }
+
+        @PreDestroy
+        public void stop() {
+            wsClient.stop();
+        }
+    }
+- type: prose
+  content: 'Có `BinanceWsClient` rồi, `RecordFeed` chỉ cần thêm 1 việc: mỗi trade nhận được, publish như bình thường VÀ ghi thêm 1 dòng NDJSON (JSON-per-line) vào file, phân theo symbol + ngày:'
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/feed/RecordFeed.java
+  lang: java
+  content: |
+    @Component
+    @ConditionalOnProperty(name = "feed.mode", havingValue = "record")
+    public class RecordFeed {
+
+        // key = "SYMBOL-yyyy-MM-dd" — rotates writers automatically at date boundary
+        private final Map<String, BufferedWriter> writers = new ConcurrentHashMap<>();
+
+        public void start() {
+            wsClient.start(this::onTrade);
+        }
+
+        private void onTrade(TradeEvent event) {
+            publisher.publish(event);
+            writeNdJson(event);
+        }
+
+        private void writeNdJson(TradeEvent event) {
+            LocalDate date = LocalDate.now(ZoneOffset.UTC);
+            String key = event.symbol() + "-" + date;
+            try {
+                BufferedWriter writer = writers.computeIfAbsent(key, k -> openWriter(event.symbol(), date));
+                writer.write(objectMapper.writeValueAsString(event));
+                writer.newLine();
+                writer.flush();
+            } catch (IOException | UncheckedIOException e) {
+                log.error("Failed to write NDJSON for symbol={} date={}: {}", event.symbol(), date, e.getMessage());
+            }
+        }
+
+        private BufferedWriter openWriter(String symbol, LocalDate date) {
+            Path dir = Path.of(feedProperties.dataPath());
+            Files.createDirectories(dir);
+            Path file = dir.resolve("trades-" + symbol + "-" + date + ".ndjson");
+            return Files.newBufferedWriter(file, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        }
+
+        @PreDestroy
+        public void stop() {
+            wsClient.stop();
+            writers.values().forEach(w -> { try { w.close(); } catch (IOException ignored) {} });
+        }
+    }
+- type: callout
+  variant: info
+  content: '**Vì sao NDJSON (1 JSON/dòng) chứ không phải 1 mảng JSON lớn?** Với dữ liệu chảy liên tục không biết khi nào dừng, một mảng JSON `[trade1, trade2, ...]` buộc bạn phải giữ dấu `]` ở cuối — nghĩa là file chỉ "hợp lệ" sau khi đóng đúng cách. NDJSON thì mỗi dòng độc lập: `flush()` xong là dòng đó đã an toàn trên đĩa, kể cả nếu service crash giữa chừng. Đây là định dạng chuẩn cho log/stream ghi liên tục.'
+- type: command
+  label: Lưu mốc bước 3.5
+  content: |
+    git add market-feed
+    git commit -m "[step-3.5] market-feed: RecordFeed (ghi NDJSON) + tách BinanceWsClient dùng chung (refactor LiveFeed)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-3.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/594b864

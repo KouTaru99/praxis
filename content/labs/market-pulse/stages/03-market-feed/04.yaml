@@ -1,0 +1,137 @@
+id: mf-04
+title: 'market-feed: LiveFeed — nối Binance WebSocket thật + tự hồi phục'
+order: 4
+est_minutes: 30
+commit_ref: 076bded
+goal: 'Viết LiveFeed: mở kết nối WebSocket tới Binance, và tự động reconnect khi rớt mạng — không cần con người can thiệp.'
+deliverable: LiveFeed (OkHttp WebSocketListener) chạy khi feed.mode=live.
+outcome_preview: 'Chạy service, đợi vài giây, thấy log "First trade received" — dữ liệu Binance thật đã chảy vào hệ thống của bạn.'
+blocks:
+- type: prose
+  content: |
+    Đây là bước "sự sống" đầu tiên của cả lab: mở một kết nối WebSocket thật tới `wss://stream.binance.com`, ghép nhiều symbol vào 1 URL combined-stream (`?streams=btcusdt@trade/ethusdt@trade`), và lắng nghe.
+
+    `@ConditionalOnProperty(name = "feed.mode", havingValue = "live", matchIfMissing = true)` nghĩa là bean này chỉ tồn tại khi `FEED_MODE=live` (hoặc không đặt gì — mặc định là live). Đây chính là cơ chế Spring dùng để "bật/tắt" cả một component theo cấu hình, không cần if/else rải khắp code.
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/feed/LiveFeed.java
+  lang: java
+  content: |
+    @Component
+    @ConditionalOnProperty(name = "feed.mode", havingValue = "live", matchIfMissing = true)
+    public class LiveFeed implements ApplicationRunner {
+
+        private static final Logger log = LoggerFactory.getLogger(LiveFeed.class);
+
+        private final FeedProperties feedProperties;
+        private final BinanceTradeMapper mapper;
+        private final TradePublisher publisher;
+
+        private final OkHttpClient httpClient = new OkHttpClient.Builder()
+                .pingInterval(20, TimeUnit.SECONDS)
+                .build();
+        private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "livefeed-reconnect");
+            t.setDaemon(true);
+            return t;
+        });
+        private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
+        private final AtomicBoolean firstTradeLogged = new AtomicBoolean(false);
+        private volatile boolean running = false;
+        private volatile WebSocket webSocket;
+
+        public LiveFeed(FeedProperties feedProperties, BinanceTradeMapper mapper, TradePublisher publisher) {
+            this.feedProperties = feedProperties;
+            this.mapper = mapper;
+            this.publisher = publisher;
+        }
+
+        @Override
+        public void run(ApplicationArguments args) {
+            start();
+        }
+
+        public void start() {
+            running = true;
+            String url = buildWsUrl();
+            Request request = new Request.Builder().url(url).build();
+            webSocket = httpClient.newWebSocket(request, new TradeWebSocketListener());
+        }
+
+        @PreDestroy
+        public void stop() {
+            running = false;
+            if (webSocket != null) {
+                webSocket.close(1000, "Service shutting down");
+            }
+            scheduler.shutdown();
+            httpClient.dispatcher().executorService().shutdown();
+        }
+
+        // Combined-stream URL: wss://.../stream?streams=btcusdt@trade/ethusdt@trade
+        private String buildWsUrl() {
+            String streams = feedProperties.symbols().stream()
+                    .map(s -> s.toLowerCase() + "@trade")
+                    .collect(Collectors.joining("/"));
+            return feedProperties.binanceWsUrl() + "?streams=" + streams;
+        }
+
+        private void scheduleReconnect() {
+            if (!running || scheduler.isShutdown()) {
+                return;
+            }
+            int attempt = reconnectAttempts.incrementAndGet();
+            if (attempt > feedProperties.reconnectMaxAttempts()) {
+                log.error("Max reconnect attempts ({}) reached, giving up", feedProperties.reconnectMaxAttempts());
+                return;
+            }
+            log.warn("Scheduling reconnect attempt {}/{} in {}s",
+                    attempt, feedProperties.reconnectMaxAttempts(), feedProperties.reconnectDelaySeconds());
+            scheduler.schedule(this::start, feedProperties.reconnectDelaySeconds(), TimeUnit.SECONDS);
+        }
+
+        private class TradeWebSocketListener extends WebSocketListener {
+
+            @Override
+            public void onOpen(WebSocket webSocket, Response response) {
+                reconnectAttempts.set(0);
+                firstTradeLogged.set(false);
+                log.info("Connected to Binance WS: {}", buildWsUrl());
+            }
+
+            @Override
+            public void onMessage(WebSocket webSocket, String text) {
+                mapper.map(text).ifPresent(event -> {
+                    if (firstTradeLogged.compareAndSet(false, true)) {
+                        log.info("First trade received: symbol={} price={}", event.symbol(), event.price());
+                    }
+                    publisher.publish(event);
+                });
+            }
+
+            @Override
+            public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                log.warn("Binance WS failure: {}", t.getMessage());
+                scheduleReconnect();
+            }
+
+            @Override
+            public void onClosed(WebSocket webSocket, int code, String reason) {
+                if (code != 1000) {
+                    log.warn("Binance WS closed unexpectedly: code={} reason={}", code, reason);
+                    scheduleReconnect();
+                }
+            }
+        }
+    }
+- type: callout
+  variant: warning
+  content: '**`reconnectAttempts.set(0)` trong `onOpen` là chi tiết dễ bỏ sót nhưng quan trọng.** Nếu không reset bộ đếm mỗi lần kết nối thành công, một service chạy vài ngày, rớt mạng thoáng qua 10 lần rải rác (mỗi lần đều tự hồi phục bình thường) sẽ cộng dồn số lần thử và bất ngờ "hết hạn mức reconnect" dù mạng đang hoàn toàn ổn. Bộ đếm phải gắn với **một lần rớt kết nối**, không phải với cả vòng đời service.'
+- type: command
+  label: Lưu mốc bước 3.4
+  content: |
+    git add market-feed
+    git commit -m "[step-3.4] market-feed: LiveFeed OkHttp WebSocket + reconnect 5s x6"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-3.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/076bded

@@ -1,0 +1,5 @@
+id: market-feed
+order: 3
+title: Nguồn dữ liệu thị trường
+description: 'Service market-feed nối WebSocket Binance thật, chuẩn hoá trade và bơm vào RabbitMQ — kèm 2 chế độ record/replay để không phụ thuộc mạng sống khi phát triển hay demo.'
+part: B · Luồng dữ liệu thời gian thực

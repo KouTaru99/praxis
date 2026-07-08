@@ -1,0 +1,111 @@
+id: mf-07
+title: 'market-feed: FeedRunner — chọn đúng 1 trong 3 chế độ lúc khởi động'
+order: 7
+est_minutes: 25
+commit_ref: 4fa6ce3
+goal: 'Viết FeedRunner: điểm khởi động duy nhất, tự chọn Live/Record/ReplayFeed nào đang tồn tại (theo feed.mode) rồi start() đúng cái đó. Viết thêm 6 unit test cho công thức tính độ trễ replay.'
+deliverable: FeedRunner (Optional injection) + ReplayFeedDeltaTest (6 ca).
+outcome_preview: 'Chỉ cần đổi biến môi trường FEED_MODE, cùng 1 service jar chạy đúng 1 trong 3 hành vi — không cần build lại, không cần if/else lộ liễu trong code nghiệp vụ.'
+blocks:
+- type: diagram
+  content: |
+    flowchart TD
+      Start([Khởi động]) --> Check{feed.mode}
+      Check -- live --> Live[LiveFeed.start]
+      Check -- record --> Record[RecordFeed.start]
+      Check -- replay --> Replay[ReplayFeed.start]
+- type: prose
+  content: |
+    Ba bước trước tạo ra 3 class độc lập (`LiveFeed`, `RecordFeed`, `ReplayFeed`), mỗi class chỉ tồn tại trong Spring context khi đúng `feed.mode` (nhờ `@ConditionalOnProperty` đã học ở bước 3.4). Nhưng phải có ai đó **gọi `.start()`** đúng lúc app khởi động — đó là việc của `FeedRunner`.
+
+    Kỹ thuật đáng chú ý: `Optional<LiveFeed>` thay vì `LiveFeed` thẳng. Vì tại một thời điểm chỉ 1 trong 3 bean tồn tại (2 cái kia bị `@ConditionalOnProperty` loại khỏi context), nếu khai `LiveFeed` trực tiếp mà đang chạy mode `replay`, Spring sẽ báo lỗi "không tìm thấy bean" ngay lúc khởi động. Bọc trong `Optional` biến "không tồn tại" từ lỗi thành trạng thái hợp lệ, kiểm tra được bằng `.isPresent()`.
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/feed/FeedRunner.java
+  lang: java
+  content: |
+    @Component
+    public class FeedRunner implements ApplicationRunner {
+
+        private static final Logger log = LoggerFactory.getLogger(FeedRunner.class);
+
+        private final Optional<LiveFeed> liveFeed;
+        private final Optional<RecordFeed> recordFeed;
+        private final Optional<ReplayFeed> replayFeed;
+
+        public FeedRunner(Optional<LiveFeed> liveFeed, Optional<RecordFeed> recordFeed,
+                          Optional<ReplayFeed> replayFeed) {
+            this.liveFeed = liveFeed;
+            this.recordFeed = recordFeed;
+            this.replayFeed = replayFeed;
+        }
+
+        @Override
+        public void run(ApplicationArguments args) {
+            if (liveFeed.isPresent()) {
+                log.info("Starting feed in LIVE mode");
+                liveFeed.get().start();
+            } else if (recordFeed.isPresent()) {
+                log.info("Starting feed in RECORD mode");
+                recordFeed.get().start();
+            } else if (replayFeed.isPresent()) {
+                log.info("Starting feed in REPLAY mode");
+                replayFeed.get().start();
+            } else {
+                log.warn("No feed started — check feed.mode property (live/record/replay)");
+            }
+        }
+    }
+- type: prose
+  content: 'Tiện thể củng cố lại `computeSleepMs()` (viết ở bước 3.6) bằng 6 test — hàm này là tim của chế độ replay, đáng được kiểm kỹ hơn 1 test qua loa:'
+- type: code
+  filename: market-feed/src/test/java/com/marketpulse/marketfeed/feed/ReplayFeedDeltaTest.java
+  lang: java
+  content: |
+    class ReplayFeedDeltaTest {
+
+        @Test
+        void firstTradeReturnsZeroSleep() {
+            assertThat(ReplayFeed.computeSleepMs(-1, 1_000L, 1.0)).isEqualTo(0);
+        }
+
+        @Test
+        void normalDeltaScaledByMultiplier() {
+            // 1000ms gap replayed at 2x speed → sleep 500ms
+            assertThat(ReplayFeed.computeSleepMs(1_000L, 2_000L, 2.0)).isEqualTo(500L);
+        }
+
+        @Test
+        void negativeDeltaClampsToZero() {
+            assertThat(ReplayFeed.computeSleepMs(2_000L, 1_000L, 1.0)).isEqualTo(0);
+        }
+
+        @Test
+        void deltaExceedingMaxClampsToZero() {
+            long gap = ReplayFeed.MAX_DELTA_MS + 1;
+            assertThat(ReplayFeed.computeSleepMs(1_000L, 1_000L + gap, 1.0)).isEqualTo(0);
+        }
+
+        @Test
+        void exactMaxDeltaIsNotClamped() {
+            assertThat(ReplayFeed.computeSleepMs(1_000L, 1_000L + ReplayFeed.MAX_DELTA_MS, 1.0))
+                    .isEqualTo(ReplayFeed.MAX_DELTA_MS);
+        }
+
+        @Test
+        void multiplierAboveOneCompressesTime() {
+            // 10s gap at 10x speed → sleep 1s
+            assertThat(ReplayFeed.computeSleepMs(0L, 10_000L, 10.0)).isEqualTo(1_000L);
+        }
+    }
+- type: callout
+  variant: info
+  content: '**`static` trên `computeSleepMs()` và `MAX_DELTA_MS` không phải tình cờ.** Một phép tính thuần (đưa vào số, nhận lại số, không đụng gì tới WebSocket/RabbitMQ/file) được tách thành hàm static — test gọi thẳng `ReplayFeed.computeSleepMs(...)` mà không cần dựng cả Spring context, không cần mock. Test 6 ca ở đây chạy trong mili-giây, không phải giây.'
+- type: command
+  label: Test + lưu mốc bước 3.7
+  content: |
+    cd market-feed && ../gradlew test --tests ReplayFeedDeltaTest
+    git add market-feed && git commit -m "[step-3.7] market-feed: FeedRunner chọn mode (Optional inject) + ReplayFeed delta unit test (6 ca)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-3.7)
+  url: https://github.com/KouTaru99/market-pulse/commit/4fa6ce3

@@ -1,0 +1,94 @@
+id: mf-06
+title: 'market-feed: ReplayFeed — phát lại NDJSON, giữ đúng nhịp thời gian'
+order: 6
+est_minutes: 30
+commit_ref: 0d563af
+goal: 'Viết ReplayFeed: đọc lại file NDJSON đã ghi ở bước trước, phát lại đúng khoảng cách thời gian giữa các trade (hoặc nén nhanh hơn), không cần WebSocket, không cần mạng.'
+deliverable: ReplayFeed (đọc file, tính độ trễ giữa 2 trade, publish với header x-replay).
+outcome_preview: 'Chạy FEED_MODE=replay trỏ vào file đã ghi — bạn có một luồng dữ liệu giống hệt live, phát lại được vô hạn lần, không phụ thuộc Binance hay mạng ngoài.'
+blocks:
+- type: prose
+  content: |
+    Đây là chế độ giải quyết đúng vấn đề đã nêu ở bước 3.1: khi không nối được `stream.binance.com` (mạng chặn, hoặc đơn giản là muốn dev offline trên máy bay), `replay` cho một luồng trade **giống hệt thật** — chỉ khác nguồn là file thay vì Binance.
+
+    Điểm hay nhất: replay **giữ đúng nhịp thời gian gốc**. Nếu 2 trade trong file cách nhau 3 giây, `ReplayFeed` cũng chờ ~3 giây trước khi phát trade thứ hai — trừ khi bạn đặt `REPLAY_MULTIPLIER` để nén nhanh hơn (×10 nghĩa là 3 giây gốc chỉ còn 0.3 giây chờ).
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/feed/ReplayFeed.java
+  lang: java
+  content: |
+    @Component
+    @ConditionalOnProperty(name = "feed.mode", havingValue = "replay")
+    public class ReplayFeed {
+
+        // gaps larger than this (e.g. missing data in file) are clamped to 0 so replay does not stall
+        static final long MAX_DELTA_MS = 60_000L;
+
+        public void start() {
+            running = true;
+            replayThread = Thread.ofVirtual().name("replay-feed").start(this::replayLoop);
+        }
+
+        private void replayLoop() {
+            Path file = Path.of(replayProperties.file());
+            int totalReplayed = 0;
+            boolean firstIteration = true;
+            do {
+                if (!firstIteration) {
+                    log.info("Replay loop: restarting from beginning of {}", file.getFileName());
+                }
+                firstIteration = false;
+                totalReplayed += replayFile(file);
+            } while (running && replayProperties.loop());
+        }
+
+        private int replayFile(Path file) throws IOException {
+            int count = 0;
+            long prevTradeTime = -1;
+            try (BufferedReader reader = Files.newBufferedReader(file)) {
+                String line;
+                while (running && (line = reader.readLine()) != null) {
+                    if (line.isBlank()) continue;
+                    TradeEvent event = objectMapper.readValue(line, TradeEvent.class);
+                    long sleepMs = computeSleepMs(prevTradeTime, event.tradeTime(), replayProperties.multiplier());
+                    if (sleepMs > 0) Thread.sleep(sleepMs);
+                    publisher.publish(event, true);   // true = gắn header x-replay
+                    prevTradeTime = event.tradeTime();
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        /**
+         * Time to sleep before emitting the current trade, scaled by multiplier.
+         * Returns 0 for the first trade (prevTradeTime == -1), for negative deltas,
+         * or when the gap exceeds MAX_DELTA_MS (data gap in the file — don't stall).
+         */
+        static long computeSleepMs(long prevTradeTime, long currTradeTime, double multiplier) {
+            if (prevTradeTime < 0) return 0;
+            long delta = currTradeTime - prevTradeTime;
+            if (delta < 0 || delta > MAX_DELTA_MS) return 0;
+            return (long) (delta / multiplier);
+        }
+
+        @PreDestroy
+        public void stop() {
+            running = false;
+            if (replayThread != null) replayThread.interrupt();
+        }
+    }
+- type: callout
+  variant: tip
+  content: '**Vì sao `Thread.ofVirtual()` thay vì thread thường?** Java 21 (bản LTS lab này dùng) có **virtual thread** — thread cực nhẹ, tạo hàng triệu cái không tốn kém như thread hệ điều hành truyền thống. Ở đây chỉ cần 1 thread nên lợi ích chưa rõ rệt, nhưng đây là thói quen đúng: `Thread.sleep()` trong vòng lặp replay sẽ *chặn* thread đó rất nhiều lần — dùng virtual thread nghĩa là "chặn" gần như miễn phí, không giữ tài nguyên hệ điều hành như thread thường.'
+- type: callout
+  variant: warning
+  content: '**`MAX_DELTA_MS` là một quyết định thiết kế nhỏ nhưng dễ gây bug khó hiểu nếu thiếu.** Nếu file NDJSON có một khoảng trống (ví dụ ghi bị gián đoạn 10 phút), replay THẬT sẽ đứng im chờ đúng 10 phút — trông như treo. Giới hạn 60 giây: khoảng trống lớn hơn thế bị coi là "lỗi dữ liệu", không phải nhịp thị trường thật, và được bỏ qua ngay.'
+- type: command
+  label: Lưu mốc bước 3.6
+  content: |
+    git add market-feed
+    git commit -m "[step-3.6] market-feed: ReplayFeed (đọc NDJSON, phát lại xN giữ nhịp, header x-replay)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-3.6)
+  url: https://github.com/KouTaru99/market-pulse/commit/0d563af

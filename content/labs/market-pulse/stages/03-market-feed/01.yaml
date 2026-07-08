@@ -1,0 +1,111 @@
+id: mf-01
+title: 'market-feed: dependency + cấu hình 3 chế độ (live/record/replay)'
+order: 1
+est_minutes: 25
+commit_ref: f7cc0e1
+goal: 'Cài dependency AMQP + OkHttp, và khai 2 nhóm cấu hình FeedProperties/ReplayProperties — nền cho toàn bộ Chặng 3.'
+deliverable: market-feed/build.gradle.kts (amqp+okhttp) + FeedProperties + ReplayProperties + application.yml.
+outcome_preview: 'Sau bước này, market-feed đã có đủ "chân" cấu hình để đọc biến môi trường quyết định chạy chế độ nào — chưa có logic thật, nhưng khung đã đúng hình.'
+blocks:
+- type: prose
+  content: |
+    Chặng 3 dựng service đầu tiên chạm vào **dữ liệu thật**: `market-feed` nối WebSocket của Binance, chuẩn hoá từng giao dịch (trade) thành một sự kiện nội bộ, rồi bơm vào RabbitMQ cho các service khác tiêu thụ.
+
+    Điểm đặc biệt của service này: nó phải chạy tốt ở **3 chế độ** — `live` (nối Binance thật), `record` (vừa live vừa ghi lại file), và `replay` (đọc lại file đã ghi, không cần mạng). Thiết kế 3 chế độ ngay từ đầu, không phải thêm sau, vì lý do rất thực tế: dữ liệu thị trường **không đứng yên để bạn debug**, và không phải máy nào cũng ra được internet tới sàn giao dịch.
+- type: diagram
+  content: |
+    flowchart LR
+      B[Binance WS] -- live --> WS[BinanceWsClient]
+      WS --> M[BinanceTradeMapper]
+      M --> P[TradePublisher]
+      P --> EX[(RabbitMQ<br/>market-pulse.trades)]
+      WS -. record .-> ND[(NDJSON file)]
+      ND -. replay .-> P
+- type: prose
+  content: 'Thêm 2 dependency: `spring-boot-starter-amqp` (publish vào RabbitMQ) và OkHttp (client WebSocket — Spring không có client WS tích hợp sẵn cho outbound, OkHttp là lựa chọn nhẹ, phổ biến):'
+- type: code
+  filename: market-feed/build.gradle.kts (thêm)
+  lang: kotlin
+  content: |
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation("org.springframework.boot:spring-boot-starter-amqp")
+        implementation("com.squareup.okhttp3:okhttp:4.12.0")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: prose
+  content: '`@ConfigurationPropertiesScan` bật trong `MarketFeedApplication` cho phép Spring tự dò các `record` gắn `@ConfigurationProperties` — không cần khai từng bean tay:'
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/config/FeedProperties.java
+  lang: java
+  content: |
+    package com.marketpulse.marketfeed.config;
+
+    import org.springframework.boot.context.properties.ConfigurationProperties;
+
+    import java.util.List;
+
+    @ConfigurationProperties(prefix = "feed")
+    public record FeedProperties(
+            String mode,
+            List<String> symbols,
+            String binanceWsUrl,
+            int reconnectDelaySeconds,
+            int reconnectMaxAttempts
+    ) {}
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/config/ReplayProperties.java
+  lang: java
+  content: |
+    package com.marketpulse.marketfeed.config;
+
+    import org.springframework.boot.context.properties.ConfigurationProperties;
+
+    @ConfigurationProperties(prefix = "replay")
+    public record ReplayProperties(
+            String file,
+            double multiplier,
+            boolean loop
+    ) {}
+- type: code
+  filename: market-feed/src/main/resources/application.yml (thêm)
+  lang: yaml
+  content: |
+    spring:
+      rabbitmq:
+        host: ${SPRING_RABBITMQ_HOST:localhost}
+        username: ${SPRING_RABBITMQ_USERNAME:market_pulse}
+        password: ${SPRING_RABBITMQ_PASSWORD:change_me}
+        template:
+          retry:
+            enabled: true
+            initial-interval: 1000
+            max-attempts: 10
+            max-interval: 10000
+            multiplier: 2
+
+    feed:
+      mode: ${FEED_MODE:live}
+      symbols: ${FEED_SYMBOLS:BTCUSDT}
+      binance-ws-url: ${BINANCE_WS_URL:wss://stream.binance.com:9443/stream}
+      reconnect-delay-seconds: ${FEED_RECONNECT_DELAY_SECONDS:5}
+      reconnect-max-attempts: ${FEED_RECONNECT_MAX_ATTEMPTS:6}
+
+    replay:
+      file: ${REPLAY_FILE:}
+      multiplier: ${REPLAY_MULTIPLIER:1.0}
+      loop: ${REPLAY_LOOP:false}
+- type: callout
+  variant: warning
+  content: '**Đọc trước khi đi tiếp — có thể bạn cần chế độ `replay` ngay từ Chặng 3.** `binance-ws-url` trỏ tới `stream.binance.com` — một domain sàn giao dịch crypto. Nhiều mạng doanh nghiệp/trường học chặn nhóm domain này vì lý do compliance, khác hẳn kiểu chặn `binaries.prisma.sh` ở Lab Mini-Wiki (đó là build tool gọi ngầm; đây là **dữ liệu thật, đúng mục đích lõi** của lab). Nếu bạn rơi vào trường hợp đó: chưa cần đổi gì ở bước này, cứ đi tiếp — tới bước 3.9 (milestone) bài học sẽ chỉ cách chạy `replay` bằng file NDJSON có sẵn, không cần tới `stream.binance.com` một lần nào.'
+- type: command
+  label: Lưu mốc bước 3.1
+  content: |
+    git add market-feed
+    git commit -m "[step-3.1] market-feed: deps (amqp+OkHttp) + config env (FeedProperties/ReplayProperties) + application.yml"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-3.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/f7cc0e1

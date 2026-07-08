@@ -1,0 +1,121 @@
+id: mf-03
+title: 'market-feed: parse Binance combined-stream → TradeEvent'
+order: 3
+est_minutes: 25
+commit_ref: b69fd68
+goal: 'Viết BinanceTradeMapper — dịch JSON thô của Binance sang TradeEvent nội bộ, chịu được message rác/không liên quan.'
+deliverable: BinanceTradeMapper + 3 unit test.
+outcome_preview: 'Có một hàm map(json) đáng tin cậy: đưa vào chuỗi bất kỳ, nhận lại Optional<TradeEvent> — không bao giờ ném exception ra ngoài.'
+blocks:
+- type: prose
+  content: |
+    Binance gửi dữ liệu qua **combined stream** — một kết nối WS chở nhiều loại sự kiện trộn lẫn (trade, depth-update, kline...), bọc trong `{"stream": "...", "data": {...}}`. `market-feed` chỉ quan tâm sự kiện `trade` (`data.e == "trade"`); mọi thứ khác phải được **bỏ qua an toàn**, không phải bug.
+
+    Thiết kế hàm `map()` trả về `Optional<TradeEvent>` thay vì ném lỗi — vì với một luồng dữ liệu sống chảy liên tục, một message lạ hay JSON hỏng không được phép làm sập cả service.
+- type: code
+  filename: market-feed/src/main/java/com/marketpulse/marketfeed/binance/BinanceTradeMapper.java
+  lang: java
+  content: |
+    package com.marketpulse.marketfeed.binance;
+
+    import com.fasterxml.jackson.databind.JsonNode;
+    import com.fasterxml.jackson.databind.ObjectMapper;
+    import com.marketpulse.common.event.TradeEvent;
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.stereotype.Component;
+
+    import java.util.Optional;
+
+    @Component
+    public class BinanceTradeMapper {
+
+        private static final Logger log = LoggerFactory.getLogger(BinanceTradeMapper.class);
+
+        private final ObjectMapper objectMapper;
+
+        public BinanceTradeMapper(ObjectMapper objectMapper) {
+            this.objectMapper = objectMapper;
+        }
+
+        /**
+         * Parses a Binance combined-stream message.
+         * Format: {"stream":"btcusdt@trade","data":{"e":"trade","s":"BTCUSDT","p":"...","q":"...","t":123,"T":456,...}}
+         * Returns empty if not a trade event or if parsing fails.
+         */
+        public Optional<TradeEvent> map(String json) {
+            try {
+                JsonNode root = objectMapper.readTree(json);
+                JsonNode data = root.path("data");
+                if (data.isMissingNode() || !"trade".equals(data.path("e").asText())) {
+                    return Optional.empty();
+                }
+                return Optional.of(new TradeEvent(
+                        data.path("s").asText(),
+                        data.path("p").asText(),
+                        data.path("q").asText(),
+                        data.path("t").asLong(),
+                        data.path("T").asLong()
+                ));
+            } catch (Exception e) {
+                log.warn("Failed to parse Binance message: {}", e.getMessage());
+                return Optional.empty();
+            }
+        }
+    }
+- type: prose
+  content: '3 test bọc đúng 3 tình huống thật sẽ gặp trên một stream sống: message hợp lệ, JSON hỏng hoàn toàn, và JSON hợp lệ nhưng không phải trade (ví dụ `depthUpdate`):'
+- type: code
+  filename: market-feed/src/test/java/com/marketpulse/marketfeed/binance/BinanceTradeMapperTest.java
+  lang: java
+  content: |
+    class BinanceTradeMapperTest {
+
+        private final BinanceTradeMapper mapper = new BinanceTradeMapper(new ObjectMapper());
+
+        @Test
+        void parsesValidTradeMessage() {
+            String json = """
+                    {"stream":"btcusdt@trade","data":{"e":"trade","E":1234567890123,"s":"BTCUSDT","t":123456,"p":"49850.00","q":"0.001","T":1234567890000,"m":true}}
+                    """.trim();
+
+            Optional<TradeEvent> result = mapper.map(json);
+
+            assertThat(result).isPresent();
+            TradeEvent event = result.get();
+            assertThat(event.symbol()).isEqualTo("BTCUSDT");
+            assertThat(event.price()).isEqualTo("49850.00");
+            assertThat(event.quantity()).isEqualTo("0.001");
+            assertThat(event.tradeId()).isEqualTo(123456L);
+            assertThat(event.tradeTime()).isEqualTo(1234567890000L);
+        }
+
+        @Test
+        void returnsEmptyForGarbageMessage() {
+            Optional<TradeEvent> result = mapper.map("not-valid-json{{{");
+            assertThat(result).isEmpty();
+        }
+
+        @Test
+        void returnsEmptyForNonTradeMessage() {
+            String json = """
+                    {"stream":"btcusdt@depthUpdate","data":{"e":"depthUpdate","E":1234567890123}}
+                    """.trim();
+
+            Optional<TradeEvent> result = mapper.map(json);
+
+            assertThat(result).isEmpty();
+        }
+    }
+- type: callout
+  variant: tip
+  content: '**Vì sao `price`/`quantity` là String, không phải BigDecimal ngay ở tầng này?** Binance tự nó cũng gửi số dưới dạng chuỗi (tránh sai số float khi serialize JSON). `TradeEvent` giữ nguyên String tới tận biên — việc ép sang `BigDecimal` (kiểu tiền tệ an toàn) chỉ xảy ra ở nơi thật sự cần TÍNH TOÁN, tức Chặng 4 (aggregation). Giữ nguyên định dạng gốc càng lâu càng tránh mất độ chính xác không cần thiết.'
+- type: command
+  label: Test + lưu mốc bước 3.3
+  content: |
+    cd market-feed && ../gradlew test --tests BinanceTradeMapperTest
+    git add market-feed && git commit -m "[step-3.3] market-feed: parse Binance combined-stream -> TradeEvent + unit test (3 ca)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-3.3)
+  url: https://github.com/KouTaru99/market-pulse/commit/b69fd68
