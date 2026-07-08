@@ -1,0 +1,45 @@
+id: ag-05
+title: 'aggregation: TradeConsumer — nối RabbitMQ vào CandleAggregator'
+order: 5
+est_minutes: 15
+commit_ref: 7d92269
+goal: 'Viết @RabbitListener nối queue aggregation.trades (khai ở bước 4.2) vào CandleAggregator (viết ở bước 4.4) — 2 khối đã có, giờ ráp lại.'
+deliverable: TradeConsumer.
+outcome_preview: 'market-feed publish 1 trade → chưa đầy 1 giây sau, CandleAggregator trong bộ nhớ aggregation đã có trade đó.'
+blocks:
+- type: prose
+  content: 'Bước ngắn nhất Chặng 4 — nhưng là bước RÁP hai mảnh trước lại với nhau. `@RabbitListener` là annotation của Spring AMQP: mỗi message tới queue chỉ định sẽ tự động gọi phương thức này, deserialize JSON thành `TradeEvent` (nhờ `Jackson2JsonMessageConverter` đã khai ở bước 4.2).'
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/consumer/TradeConsumer.java
+  lang: java
+  content: |
+    @Component
+    public class TradeConsumer {
+
+        private static final Logger log = LoggerFactory.getLogger(TradeConsumer.class);
+
+        private final CandleAggregator candleAggregator;
+
+        public TradeConsumer(CandleAggregator candleAggregator) {
+            this.candleAggregator = candleAggregator;
+        }
+
+        @RabbitListener(queues = RabbitConfig.AGGREGATION_TRADES_QUEUE)
+        public void onTrade(TradeEvent event) {
+            log.debug("Trade received: symbol={} price={} qty={} time={}",
+                    event.symbol(), event.price(), event.quantity(), event.tradeTime());
+            candleAggregator.addTrade(event);
+        }
+    }
+- type: callout
+  variant: info
+  content: '**`@RabbitListener` chạy trên thread riêng của Spring AMQP, không phải thread HTTP.** Điều này giải thích vì sao `CandleAggregator.addTrade()` phải an toàn với đa luồng (bước 4.4 đã lo việc này bằng `ConcurrentHashMap.compute`) — consumer có thể có nhiều thread xử lý song song để tăng thông lượng, và `TradeConsumer` không kiểm soát được điều đó, cũng không nên phải kiểm soát: an toàn đa luồng là trách nhiệm của `CandleAggregator`, không phải của người gọi nó.'
+- type: command
+  label: Lưu mốc bước 4.5
+  content: |
+    git add aggregation
+    git commit -m "[step-4.5] aggregation: TradeConsumer @RabbitListener(aggregation.trades) → CandleAggregator"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/7d92269

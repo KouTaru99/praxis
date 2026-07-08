@@ -1,0 +1,116 @@
+id: ag-06
+title: 'aggregation: CandleFlusher — định kỳ đóng nến, lưu DB, phát sự kiện'
+order: 6
+est_minutes: 30
+commit_ref: 7ca6e9c
+goal: 'Viết CandleFlusher chạy định kỳ (@Scheduled): rút các nến đã đóng phút ra khỏi bộ nhớ, lưu DB idempotent, publish Candle1mEvent. Đây là bước khép kín toàn bộ luồng Chặng 4.'
+deliverable: CandleFlusher + @EnableScheduling + trusted packages cho Jackson2JsonMessageConverter.
+outcome_preview: 'Đúng chu kỳ 10 giây, nến đã đóng phút tự động rời bộ nhớ, xuống PostgreSQL, và xuất hiện trên exchange market-pulse.candles — không cần ai gọi tay.'
+blocks:
+- type: diagram
+  content: |
+    sequenceDiagram
+      participant Q as aggregation.trades
+      participant TC as TradeConsumer
+      participant CA as CandleAggregator (in-memory)
+      participant CF as CandleFlusher (mỗi 10s)
+      participant DB as candles_1m
+      participant EX as market-pulse.candles
+      Q->>TC: TradeEvent
+      TC->>CA: addTrade()
+      loop mỗi flush-interval-ms
+        CF->>CA: drainClosedWindows(now)
+        CA-->>CF: nến đã đóng phút
+        CF->>DB: save (nếu chưa tồn tại)
+        CF->>EX: publish Candle1mEvent
+      end
+- type: prose
+  content: |
+    Ba mảnh đã có: queue nhận trade (4.2), bộ nhớ gom nến (4.4), consumer nối 2 cái đó (4.5). Còn thiếu mảnh cuối: **ai đó phải định kỳ hỏi** "nến nào đã đóng phút chưa?" — đó là `CandleFlusher`, chạy bằng `@Scheduled`.
+
+    `@EnableScheduling` phải được bật ở class `@SpringBootApplication` — thiếu dòng này, `@Scheduled` trên `CandleFlusher` sẽ bị Spring **âm thầm bỏ qua**, không báo lỗi gì, khó phát hiện.
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/AggregationApplication.java
+  lang: java
+  content: |
+    @SpringBootApplication
+    @EnableScheduling
+    public class AggregationApplication {
+        public static void main(String[] args) {
+            SpringApplication.run(AggregationApplication.class, args);
+        }
+    }
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/flush/CandleFlusher.java
+  lang: java
+  content: |
+    @Component
+    public class CandleFlusher {
+
+        private static final Logger log = LoggerFactory.getLogger(CandleFlusher.class);
+
+        private final CandleAggregator candleAggregator;
+        private final CandleRepository candleRepository;
+        private final RabbitTemplate rabbitTemplate;
+
+        public CandleFlusher(CandleAggregator candleAggregator,
+                             CandleRepository candleRepository,
+                             RabbitTemplate rabbitTemplate) {
+            this.candleAggregator = candleAggregator;
+            this.candleRepository = candleRepository;
+            this.rabbitTemplate = rabbitTemplate;
+        }
+
+        @Scheduled(fixedDelayString = "${aggregation.flush.flush-interval-ms}")
+        public void flush() {
+            List<CandleWindow> closed = candleAggregator.drainClosedWindows(System.currentTimeMillis());
+            if (closed.isEmpty()) return;
+
+            int flushed = 0;
+            for (CandleWindow window : closed) {
+                try {
+                    Candle entity = window.toEntity();
+                    if (candleRepository.existsBySymbolAndOpenTime(entity.getSymbol(), entity.getOpenTime())) {
+                        log.warn("Duplicate candle skipped: {} @ {}", entity.getSymbol(), entity.getOpenTime());
+                        continue;
+                    }
+                    candleRepository.save(entity);
+                    rabbitTemplate.convertAndSend(
+                            RabbitConfig.CANDLES_EXCHANGE,
+                            window.getSymbol() + ".1m",
+                            window.toCandle1mEvent());
+                    flushed++;
+                } catch (Exception e) {
+                    log.error("Failed to flush candle {} @ {}: {}",
+                            window.getSymbol(), window.getOpenTimeMs(), e.getMessage(), e);
+                }
+            }
+            if (flushed > 0) log.info("Flushed {} candle(s)", flushed);
+        }
+    }
+- type: prose
+  content: 'Một tinh chỉnh nhỏ nhưng cần thiết ở `RabbitConfig`: khai `trustedPackages` cho bộ chuyển đổi JSON — bắt buộc khi publish một kiểu record (`Candle1mEvent`) mà consumer phía bên kia (Chặng 5) sẽ deserialize ngược lại đúng kiểu Java đó:'
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/config/RabbitConfig.java (thêm)
+  lang: java
+  content: |
+    @Bean
+    public Jackson2JsonMessageConverter jackson2JsonMessageConverter() {
+        DefaultJackson2JavaTypeMapper typeMapper = new DefaultJackson2JavaTypeMapper();
+        typeMapper.setTrustedPackages("com.marketpulse.*");
+        Jackson2JsonMessageConverter converter = new Jackson2JsonMessageConverter();
+        converter.setClassMapper(typeMapper);
+        return converter;
+    }
+- type: callout
+  variant: warning
+  content: '**`existsBySymbolAndOpenTime` trước khi save không phải phòng xa thừa thãi — nó chống một tình huống có thật.** `@Scheduled(fixedDelay=...)` đảm bảo lần chạy sau chỉ bắt đầu SAU khi lần trước xong, nhưng nếu service restart giữa 2 chu kỳ (ví dụ do deploy lại), có khả năng một nến đã lưu DB trước khi crash, rồi sau khi khởi động lại bị tính toán và cố lưu lần nữa. Kiểm tồn tại trước khi save — cộng với ràng buộc `UNIQUE(symbol, open_time)` ở tầng DB (bước 4.1) làm lưới an toàn thứ hai — khiến `flush()` **idempotent**: chạy lại không tạo dữ liệu trùng.'
+- type: command
+  label: Lưu mốc bước 4.6
+  content: |
+    git add aggregation
+    git commit -m "[step-4.6] aggregation: CandleFlusher @Scheduled drain→persist+publish Candle1mEvent (idempotent) + @EnableScheduling + trusted packages"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.6)
+  url: https://github.com/KouTaru99/market-pulse/commit/7ca6e9c

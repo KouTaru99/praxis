@@ -1,0 +1,69 @@
+id: ag-02
+title: 'aggregation: topology RabbitMQ — nghe fanout trade, phát topic candle'
+order: 2
+est_minutes: 20
+commit_ref: 305c1c4
+goal: 'Khai báo queue lắng nghe exchange trades của market-feed, và một topic exchange mới để phát nến ra ngoài theo routing key <symbol>.1m.'
+deliverable: RabbitConfig — queue aggregation.trades bind vào market-pulse.trades + topic exchange market-pulse.candles.
+outcome_preview: 'Đường ống đủ 2 chặng: market-feed → (fanout) → aggregation nghe được; aggregation → (topic) → sẵn sàng cho Chặng 5 nghe theo symbol.'
+blocks:
+- type: diagram
+  content: |
+    flowchart LR
+      MF[market-feed] -- fanout --> EX1[(market-pulse.trades)]
+      EX1 --> Q[aggregation.trades queue]
+      Q --> AG[aggregation service]
+      AG -- topic key: symbol.1m --> EX2[(market-pulse.candles)]
+- type: prose
+  content: |
+    Chặng 3 dùng **fanout** cho `market-pulse.trades` (mọi consumer nhận hết, không cần biết trước ai nghe). Ở đây `aggregation` tự tạo một **queue riêng** (`aggregation.trades`) và bind vào fanout đó — đây là cách nhiều consumer cùng đọc một fanout mà mỗi consumer vẫn có hàng đợi riêng, không tranh nhau message của nhau.
+
+    Chiều phát thì khác: `market-pulse.candles` là **topic exchange**, dùng routing key `<symbol>.1m` (ví dụ `BTCUSDT.1m`). Topic exchange cho phép consumer sau này (Chặng 5: `rule-engine`) lọc theo pattern — ví dụ chỉ nghe `BTCUSDT.*` — điều fanout không làm được.
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/config/RabbitConfig.java
+  lang: java
+  content: |
+    @Configuration
+    public class RabbitConfig {
+
+        public static final String TRADES_EXCHANGE = "market-pulse.trades";
+        public static final String CANDLES_EXCHANGE = "market-pulse.candles";
+        public static final String AGGREGATION_TRADES_QUEUE = "aggregation.trades";
+
+        @Bean
+        public FanoutExchange tradesExchange() {
+            return new FanoutExchange(TRADES_EXCHANGE, true, false);
+        }
+
+        @Bean
+        public Queue aggregationTradesQueue() {
+            return new Queue(AGGREGATION_TRADES_QUEUE, true);
+        }
+
+        @Bean
+        public Binding aggregationTradesBinding(Queue aggregationTradesQueue, FanoutExchange tradesExchange) {
+            return BindingBuilder.bind(aggregationTradesQueue).to(tradesExchange);
+        }
+
+        @Bean
+        public TopicExchange candlesExchange() {
+            return new TopicExchange(CANDLES_EXCHANGE, true, false);
+        }
+
+        @Bean
+        public Jackson2JsonMessageConverter jackson2JsonMessageConverter() {
+            return new Jackson2JsonMessageConverter();
+        }
+    }
+- type: callout
+  variant: tip
+  content: '**`market-feed` không cần biết `aggregation` tồn tại.** Nó chỉ publish vào `market-pulse.trades`; ai bind queue vào đó là việc của consumer, không phải producer. Đây là giá trị cốt lõi của kiến trúc message-driven qua broker: thêm một consumer mới (giả sử sau này bạn muốn ghi log mọi trade ra một service riêng) không cần sửa dòng nào ở `market-feed`.'
+- type: command
+  label: Lưu mốc bước 4.2
+  content: |
+    git add aggregation
+    git commit -m "[step-4.2] aggregation: RabbitMQ topology (consume aggregation.trades fanout + publish market-pulse.candles topic)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.2)
+  url: https://github.com/KouTaru99/market-pulse/commit/305c1c4

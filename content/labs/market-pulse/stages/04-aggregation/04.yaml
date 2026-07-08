@@ -1,0 +1,132 @@
+id: ag-04
+title: 'aggregation: CandleAggregator — tumbling window OHLCV trong bộ nhớ'
+order: 4
+est_minutes: 40
+commit_ref: fe60d56
+goal: 'Viết trái tim của Chặng 4: gom trade thành nến theo cửa sổ 1 phút KHÔNG chồng lấn (tumbling window), an toàn khi nhiều thread cùng ghi.'
+deliverable: CandleAggregator + CandleWindow + 3 unit test.
+outcome_preview: 'Đưa vào 3 trade rải trong cùng 1 phút, nhận lại đúng 1 nến với open=trade đầu, close=trade cuối, high/low đúng, volume cộng dồn.'
+blocks:
+- type: prose
+  content: |
+    **Tumbling window** (cửa sổ lăn) là khái niệm cốt lõi ở đây: chia dòng thời gian thành các đoạn 1 phút liên tiếp, KHÔNG chồng lấn (khác **sliding window** — cửa sổ trượt, có thể chồng lấn, dùng cho việc khác như "trung bình 5 phút gần nhất"). Trade lúc `10:00:00` tới `10:00:59` thuộc về đúng 1 cây nến `openTime=10:00:00`.
+
+    `CandleAggregator` giữ các cửa sổ ĐANG MỞ trong bộ nhớ (`ConcurrentHashMap`), khoá theo `(symbol, phút)`. Chưa lưu DB gì ở bước này — đó là việc của `CandleFlusher` (bước 4.6).
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/aggregator/CandleAggregator.java
+  lang: java
+  content: |
+    @Component
+    public class CandleAggregator {
+
+        private final ConcurrentHashMap<WindowKey, CandleWindow> windows = new ConcurrentHashMap<>();
+
+        public void addTrade(TradeEvent trade) {
+            // floor tradeTime to the start of its minute
+            long openTimeMs = (trade.tradeTime() / 60_000L) * 60_000L;
+            BigDecimal price = new BigDecimal(trade.price());
+            BigDecimal qty = new BigDecimal(trade.quantity());
+            WindowKey key = new WindowKey(trade.symbol(), openTimeMs);
+
+            // compute holds a per-key lock, serialising concurrent addTrade for the same window
+            windows.compute(key, (k, w) -> {
+                if (w == null) return new CandleWindow(k.symbol(), k.openTimeMs(), price, qty);
+                w.accumulate(price, qty);
+                return w;
+            });
+        }
+
+        /**
+         * Returns and removes all windows whose minute has fully elapsed.
+         * A window is closed when openTimeMs + 60_000 <= nowEpochMs.
+         * The current minute's window is kept in place.
+         */
+        public List<CandleWindow> drainClosedWindows(long nowEpochMs) {
+            List<CandleWindow> closed = new ArrayList<>();
+            windows.entrySet().removeIf(entry -> {
+                if (entry.getKey().openTimeMs() + 60_000L <= nowEpochMs) {
+                    closed.add(entry.getValue());
+                    return true;
+                }
+                return false;
+            });
+            return closed;
+        }
+
+        record WindowKey(String symbol, long openTimeMs) {}
+    }
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/aggregator/CandleWindow.java
+  lang: java
+  content: |
+    public class CandleWindow {
+
+        private final String symbol;
+        private final long openTimeMs;
+        private BigDecimal open, high, low, close, volume;
+        private int tradeCount;
+
+        CandleWindow(String symbol, long openTimeMs, BigDecimal firstPrice, BigDecimal firstQty) {
+            this.symbol = symbol;
+            this.openTimeMs = openTimeMs;
+            this.open = this.high = this.low = this.close = firstPrice;
+            this.volume = firstQty;
+            this.tradeCount = 1;
+        }
+
+        // Called only under ConcurrentHashMap.compute per-key lock — no extra sync needed.
+        void accumulate(BigDecimal price, BigDecimal qty) {
+            if (price.compareTo(high) > 0) high = price;
+            if (price.compareTo(low) < 0) low = price;
+            close = price;
+            volume = volume.add(qty);
+            tradeCount++;
+        }
+
+        public Candle1mEvent toCandle1mEvent() {
+            return new Candle1mEvent(symbol, openTimeMs,
+                    open.toPlainString(), high.toPlainString(),
+                    low.toPlainString(), close.toPlainString(),
+                    volume.toPlainString(), tradeCount);
+        }
+
+        public Candle toEntity() {
+            OffsetDateTime openTime = OffsetDateTime.ofInstant(Instant.ofEpochMilli(openTimeMs), ZoneOffset.UTC);
+            return Candle.of(symbol, openTime, open, high, low, close, volume, tradeCount);
+        }
+    }
+- type: prose
+  content: 'Test quan trọng nhất kiểm đúng công thức OHLCV — 3 trade rải trong 1 phút, `drainClosedWindows` chỉ trả về khi phút đã trôi qua:'
+- type: code
+  filename: aggregation/src/test/java/com/marketpulse/aggregation/aggregator/CandleAggregatorTest.java (trích)
+  lang: java
+  content: |
+    @Test
+    void threeTradesInSameMinute_producesCorrectOHLCV() {
+        aggregator.addTrade(trade("BTCUSDT", "100.0", "1.0", MINUTE_0 + 1_000));
+        aggregator.addTrade(trade("BTCUSDT", "150.0", "2.0", MINUTE_0 + 30_000));
+        aggregator.addTrade(trade("BTCUSDT", "80.0",  "0.5", MINUTE_0 + 59_000));
+
+        List<CandleWindow> drained = aggregator.drainClosedWindows(MINUTE_1 + 1);
+
+        assertThat(drained).hasSize(1);
+        CandleWindow w = drained.get(0);
+        assertThat(w.toCandle1mEvent().open()).isEqualTo("100.0");   // trade đầu tiên
+        assertThat(w.toCandle1mEvent().high()).isEqualTo("150.0");   // giá cao nhất
+        assertThat(w.toCandle1mEvent().low()).isEqualTo("80.0");     // giá thấp nhất
+        assertThat(w.toCandle1mEvent().close()).isEqualTo("80.0");   // trade cuối cùng
+        assertThat(w.toCandle1mEvent().volume()).isEqualTo("3.5");   // 1.0+2.0+0.5 cộng dồn
+        assertThat(w.toCandle1mEvent().tradeCount()).isEqualTo(3);
+    }
+- type: callout
+  variant: warning
+  content: '**`ConcurrentHashMap.compute()` không phải chi tiết trang trí — nó GIẢI QUYẾT một race condition thật.** `TradeConsumer` (bước 4.5) có thể nhận nhiều trade gần như đồng thời từ RabbitMQ. Nếu 2 thread cùng đọc `windows.get(key)`, cùng thấy `null`, cùng tạo `CandleWindow` mới — một trade sẽ bị "mất" (ghi đè). `compute()` giữ khoá đúng trên key đó trong lúc thực thi callback, đảm bảo "đọc rồi ghi" là 1 thao tác nguyên tử. Đây là lỗi race-condition kinh điển, dễ viết sai, khó phát hiện qua test thông thường (chỉ lộ khi tải cao).'
+- type: command
+  label: Test + lưu mốc bước 4.4
+  content: |
+    cd aggregation && ../gradlew test --tests CandleAggregatorTest
+    git add aggregation && git commit -m "[step-4.4] aggregation: CandleAggregator (tumbling 1m window OHLCV, BigDecimal) + 3 unit test"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/fe60d56

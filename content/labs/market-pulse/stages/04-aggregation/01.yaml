@@ -1,0 +1,84 @@
+id: ag-01
+title: 'aggregation: dependency + database riêng + schema candles_1m'
+order: 1
+est_minutes: 25
+commit_ref: 52401a6
+goal: 'Cài đặt AMQP+JPA+Flyway, và tạo migration V1 cho bảng candles_1m — đúng nguyên tắc db-per-service đã theo từ Chặng 2.'
+deliverable: build.gradle.kts (amqp+jpa+flyway) + application.yml (datasource riêng cổng 5433) + V1__init.sql.
+outcome_preview: 'aggregation có database riêng của chính nó (không chung với identity) — mỗi service tự chủ dữ liệu, đúng tinh thần microservices.'
+blocks:
+- type: prose
+  content: |
+    Chặng 3 kết thúc với trade thô chảy vào RabbitMQ. Chặng 4 dựng service THỨ HAI trong đường ống: `aggregation` — nó nghe trade, gom lại thành **nến 1 phút** (OHLCV: Open/High/Low/Close/Volume — 4 mức giá + khối lượng giao dịch trong khung thời gian, ngôn ngữ chuẩn của biểu đồ tài chính).
+
+    Giữ nguyên nguyên tắc **database-per-service** đã áp dụng từ `identity` ở Chặng 2: `aggregation` có Postgres riêng (cổng `5433`, khác cổng `5432` của `identity-db`), không đọc/ghi chung schema với service khác.
+- type: code
+  filename: aggregation/build.gradle.kts (thêm)
+  lang: kotlin
+  content: |
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation("org.springframework.boot:spring-boot-starter-amqp")
+        implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+        implementation("org.flywaydb:flyway-core")
+        implementation("org.flywaydb:flyway-database-postgresql")
+        runtimeOnly("org.postgresql:postgresql")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: aggregation/src/main/resources/application.yml (thêm)
+  lang: yaml
+  content: |
+    spring:
+      rabbitmq:
+        host: ${SPRING_RABBITMQ_HOST:localhost}
+        username: ${SPRING_RABBITMQ_USERNAME:market_pulse}
+        password: ${SPRING_RABBITMQ_PASSWORD:change_me}
+      datasource:
+        url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/aggregation}
+        username: ${SPRING_DATASOURCE_USERNAME:aggregation_user}
+        password: ${SPRING_DATASOURCE_PASSWORD:change_me}
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        open-in-view: false
+      flyway:
+        enabled: true
+
+    aggregation:
+      flush:
+        flush-interval-ms: 10000
+- type: prose
+  content: 'Migration `V1__init.sql`: một bảng, một ràng buộc UNIQUE quan trọng — `(symbol, open_time)`. Ràng buộc này là chốt chặn trùng lặp cuối cùng, sẽ dùng lại ở bước 4.6:'
+- type: code
+  filename: aggregation/src/main/resources/db/migration/V1__init.sql
+  lang: sql
+  content: |
+    CREATE TABLE candles_1m (
+        id          BIGSERIAL PRIMARY KEY,
+        symbol      VARCHAR(20)    NOT NULL,
+        open_time   TIMESTAMPTZ    NOT NULL,
+        open_price  NUMERIC(20, 8) NOT NULL,
+        high_price  NUMERIC(20, 8) NOT NULL,
+        low_price   NUMERIC(20, 8) NOT NULL,
+        close_price NUMERIC(20, 8) NOT NULL,
+        volume      NUMERIC(20, 8) NOT NULL,
+        trade_count INT            NOT NULL,
+        UNIQUE (symbol, open_time)
+    );
+
+    CREATE INDEX idx_candles_lookup ON candles_1m (symbol, open_time DESC);
+- type: callout
+  variant: info
+  content: '**Vì sao `NUMERIC(20, 8)` chứ không phải `FLOAT`/`DOUBLE`?** Giá và khối lượng crypto cần độ chính xác tuyệt đối tới 8 chữ số thập phân (đơn vị nhỏ nhất của BTC là 1 satoshi = 0.00000001). Kiểu dấu phẩy động (`FLOAT`/`DOUBLE`) có sai số làm tròn nhị phân — tưởng vô hại nhưng cộng dồn qua hàng triệu giao dịch sẽ lệch số thật. `NUMERIC` lưu chính xác tuyệt đối, đúng như `BigDecimal` phía Java sẽ dùng ở bước 4.4.'
+- type: command
+  label: Lưu mốc bước 4.1
+  content: |
+    git add aggregation
+    git commit -m "[step-4.1] aggregation: deps (amqp+jpa+flyway) + config + Flyway V1 candles_1m schema"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/52401a6

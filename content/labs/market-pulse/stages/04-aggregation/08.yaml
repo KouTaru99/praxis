@@ -1,0 +1,82 @@
+id: ag-08
+title: 'Milestone Chặng 4: smoke-test 4 ca — trade thật tới nến thật'
+order: 8
+est_minutes: 30
+commit_ref: 555821f
+goal: 'Chạy market-feed + aggregation cùng lúc, verify bằng 4 ca smoke-test rằng trade thô đã biến thành nến 1 phút đúng schema, nằm cả trong RabbitMQ lẫn PostgreSQL.'
+deliverable: scripts/smoke-ch4.sh (4 ca) + docs/smoke-ch4.md.
+outcome_preview: '4/4 PASS — sau tối đa ~95 giây (phải chờ qua ít nhất 1 mốc phút + 1 chu kỳ flush), một Candle1mEvent đúng schema xuất hiện.'
+blocks:
+- type: prose
+  content: 'Chặng 4 phụ thuộc trực tiếp vào Chặng 3 đang chạy — không có trade thì không có gì để gom. Bật đúng thứ tự:'
+- type: command
+  label: Bật cả 2 chặng + chạy smoke
+  content: |
+    # 1. market-feed phải đang live (nguồn trade)
+    docker compose -f infra/docker-compose.yml --env-file infra/.env --profile feed up -d --build
+
+    # 2. Bật aggregation + DB riêng (chưa dùng --profile processing vì nó kéo cả
+    #    rule-engine chưa có Dockerfile tới Chặng 5 — bật đích danh 2 service)
+    docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build aggregation aggregation-db
+
+    # 3. Chờ healthy rồi chạy smoke (chờ tới ~95s vì phải qua 1 mốc phút)
+    bash scripts/smoke-ch4.sh
+- type: prose
+  content: '4 ca kiểm, đi từ hạ tầng tới đúng dữ liệu nghiệp vụ:'
+- type: code
+  filename: (bảng tham khảo — không phải file thật)
+  lang: markdown
+  content: |
+    | Ca  | Kiểm                          | Kỳ vọng                                             |
+    |-----|--------------------------------|------------------------------------------------------|
+    | TC1 | `aggregation` container       | `healthy`                                            |
+    | TC2 | Queue `aggregation.trades`    | có ≥1 consumer (aggregation đang thật sự nghe)       |
+    | TC3 | Exchange `market-pulse.candles`| sau khi qua mốc phút + flush → có Candle1mEvent      |
+    | TC4 | Định dạng nến                 | đủ OHLCV + `openTime` chia hết 60000 (đúng đầu phút) |
+- type: code
+  filename: scripts/smoke-ch4.sh (trích TC3 — chờ có kiên nhẫn, không chờ cố định)
+  lang: bash
+  content: |
+    echo "      [chờ tối đa ~95s cho nến đóng phút + flush...]"
+    get_json="[]"
+    n=0
+    while [ "$n" -lt 19 ]; do
+        sleep 5
+        n=$((n + 1))
+        get_json=$(curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/queues/%2F/${VQUEUE}/get" \
+            -H "content-type: application/json" \
+            -d '{"count":5,"ackmode":"ack_requeue_true","encoding":"auto"}')
+        cnt=$(printf '%s' "$get_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+        if [ "${cnt:-0}" -gt 0 ] 2>/dev/null; then break; fi
+    done
+- type: callout
+  variant: info
+  content: '**Vì sao vòng lặp `while` chờ tối đa 95 giây, không phải `sleep 95` một phát?** Nếu nến xuất hiện ở giây thứ 12, `sleep 95` vẫn bắt bạn đợi hết 95 giây mới kiểm — lãng phí thời gian phát triển tích luỹ qua hàng chục lần chạy test. Poll mỗi 5 giây, thoát ngay khi có dữ liệu, là mẫu hình chờ-điều-kiện tốt hơn chờ-thời-gian-cố-định — dùng được ở bất kỳ đâu cần "chờ tới khi X xảy ra" thay vì "chờ đúng N giây".'
+- type: callout
+  variant: warning
+  content: '**Nếu bạn đang chạy `market-feed` ở chế độ `replay` (vì mạng chặn Binance, xem Chặng 3 bước 3.9) — mọi thứ ở đây vẫn hoạt động y hệt.** `aggregation` không hề biết trade tới từ đâu; nó chỉ nghe `market-pulse.trades`, và cả `LiveFeed` lẫn `ReplayFeed` đều publish vào đúng exchange đó qua cùng một `TradePublisher`. Đây là minh chứng cụ thể cho giá trị của việc tách lớp (Chặng 3, bước 3.5): mọi service PHÍA SAU market-feed hoàn toàn không bị ảnh hưởng bởi việc nguồn dữ liệu là mạng sống hay file phát lại.'
+- type: prose
+  content: 'Kết quả mong đợi:'
+- type: code
+  filename: (output thật)
+  lang: text
+  content: |
+    === Smoke test Chặng 4 — aggregation: trade → nến 1 phút ===
+
+    PASS  TC1  aggregation container healthy       → healthy
+    PASS  TC2  aggregation consume aggregation.trades → yes  [1 consumer]
+          [chờ tối đa ~95s cho nến đóng phút + flush...]
+    PASS  TC3  Candle1mEvent xuất hiện trong queue  → yes  [+45s]
+    PASS  TC4  nến đúng schema + openTime đầu phút  → ok
+
+    === Kết quả: PASS=4  FAIL=0 ===
+    PASS  Chặng 4 milestone — aggregation gom nến 1 phút hoạt động đúng
+- type: command
+  label: Lưu mốc bước 4.8 — kết thúc Chặng 4
+  content: |
+    git add docs/smoke-ch4.md scripts/smoke-ch4.sh
+    git commit -m "[step-4.8] smoke-ch4.sh: 4 ca (healthy/consumer/candle-in-queue/schema) + docs — milestone Chặng 4"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.8)
+  url: https://github.com/KouTaru99/market-pulse/commit/555821f

@@ -1,0 +1,5 @@
+id: aggregation
+order: 4
+title: Gom nến 1 phút (OHLCV)
+description: 'Service aggregation nghe trade thô từ market-feed, gom thành nến 1 phút (tumbling window OHLCV) trong bộ nhớ, rồi định kỳ lưu DB và phát Candle1mEvent cho các service khác dùng.'
+part: B · Luồng dữ liệu thời gian thực

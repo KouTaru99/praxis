@@ -1,0 +1,92 @@
+id: ag-03
+title: 'aggregation: entity Candle + repository chống trùng'
+order: 3
+est_minutes: 20
+commit_ref: d3ce4ef
+goal: 'Viết JPA entity Candle ánh xạ bảng candles_1m, và 1 phương thức repository duy nhất cần cho việc chống lưu trùng.'
+deliverable: Candle entity (factory method, không setter công khai) + CandleRepository.existsBySymbolAndOpenTime.
+outcome_preview: 'Có cách tạo + lưu 1 cây nến vào DB — nhưng chưa có gì tính TOÁN ra cây nến đó (việc đó dành cho bước 4.4).'
+blocks:
+- type: prose
+  content: |
+    Entity `Candle` cố tình **không có setter công khai** — chỉ có 1 static factory `Candle.of(...)` nhận đủ tham số ngay từ đầu, và constructor rỗng `protected` (Hibernate bắt buộc phải có, nhưng không cho code nghiệp vụ gọi trực tiếp). Một cây nến, một khi đã tính xong OHLCV, không có lý do gì để bị sửa từng trường riêng lẻ sau đó — bất biến (immutable) đúng với bản chất dữ liệu lịch sử.
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/domain/Candle.java
+  lang: java
+  content: |
+    @Entity
+    @Table(name = "candles_1m")
+    public class Candle {
+
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private Long id;
+
+        @Column(nullable = false, length = 20)
+        private String symbol;
+
+        @Column(name = "open_time", nullable = false)
+        private OffsetDateTime openTime;
+
+        @Column(name = "open_price", nullable = false, precision = 20, scale = 8)
+        private BigDecimal openPrice;
+        @Column(name = "high_price", nullable = false, precision = 20, scale = 8)
+        private BigDecimal highPrice;
+        @Column(name = "low_price", nullable = false, precision = 20, scale = 8)
+        private BigDecimal lowPrice;
+        @Column(name = "close_price", nullable = false, precision = 20, scale = 8)
+        private BigDecimal closePrice;
+        @Column(nullable = false, precision = 20, scale = 8)
+        private BigDecimal volume;
+        @Column(name = "trade_count", nullable = false)
+        private int tradeCount;
+
+        protected Candle() {}
+
+        public static Candle of(String symbol, OffsetDateTime openTime,
+                                 BigDecimal openPrice, BigDecimal highPrice,
+                                 BigDecimal lowPrice, BigDecimal closePrice,
+                                 BigDecimal volume, int tradeCount) {
+            Candle c = new Candle();
+            c.symbol = symbol;
+            c.openTime = openTime;
+            c.openPrice = openPrice;
+            c.highPrice = highPrice;
+            c.lowPrice = lowPrice;
+            c.closePrice = closePrice;
+            c.volume = volume;
+            c.tradeCount = tradeCount;
+            return c;
+        }
+
+        // getter cho mọi trường — không có setter
+        public Long getId() { return id; }
+        public String getSymbol() { return symbol; }
+        public OffsetDateTime getOpenTime() { return openTime; }
+        public BigDecimal getOpenPrice() { return openPrice; }
+        public BigDecimal getHighPrice() { return highPrice; }
+        public BigDecimal getLowPrice() { return lowPrice; }
+        public BigDecimal getClosePrice() { return closePrice; }
+        public BigDecimal getVolume() { return volume; }
+        public int getTradeCount() { return tradeCount; }
+    }
+- type: code
+  filename: aggregation/src/main/java/com/marketpulse/aggregation/repository/CandleRepository.java
+  lang: java
+  content: |
+    public interface CandleRepository extends JpaRepository<Candle, Long> {
+
+        boolean existsBySymbolAndOpenTime(String symbol, OffsetDateTime openTime);
+    }
+- type: callout
+  variant: info
+  content: '**Vì sao chỉ 1 phương thức tự viết, không thêm findBy... cho mọi trường hợp?** `JpaRepository<Candle, Long>` đã cho sẵn `save()`, `findById()`, `findAll()`... `existsBySymbolAndOpenTime` là phương thức DUY NHẤT chưa có sẵn mà bước 4.6 thật sự cần (kiểm tra trùng trước khi lưu). Thêm phương thức "phòng khi cần sau này" là over-engineering — Chặng 8 (dashboard) sẽ cần query khác, viết lúc đó.'
+- type: command
+  label: Lưu mốc bước 4.3
+  content: |
+    git add aggregation
+    git commit -m "[step-4.3] aggregation: Candle entity (candles_1m) + repository (existsBySymbolAndOpenTime)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.3)
+  url: https://github.com/KouTaru99/market-pulse/commit/d3ce4ef

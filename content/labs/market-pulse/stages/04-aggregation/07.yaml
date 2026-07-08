@@ -1,0 +1,56 @@
+id: ag-07
+title: 'aggregation: đóng gói Docker'
+order: 7
+est_minutes: 15
+commit_ref: 86df1a2
+goal: 'Dockerfile multi-stage đúng khuôn đã dùng ở Chặng 2-3, né sẵn bẫy curl/wget đã học.'
+deliverable: aggregation/Dockerfile + fix healthcheck dùng wget.
+outcome_preview: 'docker compose build aggregation ra image chạy được, healthcheck đúng ngay lần đầu — không phải tự dò lỗi "unhealthy" như những chặng trước.'
+blocks:
+- type: prose
+  content: 'Không có gì mới về kỹ thuật đóng gói — đây là lúc **khuôn đã ổn định** phát huy tác dụng: copy gần như nguyên xi Dockerfile của `market-feed` (Chặng 3), đổi tên module + cổng:'
+- type: code
+  filename: aggregation/Dockerfile
+  lang: dockerfile
+  content: |
+    FROM eclipse-temurin:21-jdk AS builder
+    WORKDIR /workspace
+    COPY gradlew ./
+    COPY gradle gradle/
+    COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+    COPY common/build.gradle.kts       common/build.gradle.kts
+    COPY aggregation/build.gradle.kts  aggregation/build.gradle.kts
+    # ... build.gradle.kts của các subproject còn lại ...
+    COPY common/src      common/src
+    COPY aggregation/src aggregation/src
+    RUN --mount=type=cache,target=/root/.gradle chmod +x gradlew && ./gradlew :aggregation:bootJar --no-daemon -x test
+
+    FROM eclipse-temurin:21-jre-alpine
+    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+    WORKDIR /app
+    COPY --from=builder /workspace/aggregation/build/libs/aggregation.jar app.jar
+    USER appuser
+    EXPOSE 8086
+    ENTRYPOINT ["java", "-Xmx256m", "-jar", "app.jar"]
+- type: code
+  filename: infra/docker-compose.yml (healthcheck aggregation)
+  lang: yaml
+  content: |
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8086/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+- type: callout
+  variant: tip
+  content: '**Chủ động né bẫy đã gặp = dấu hiệu khuôn đang ổn định.** `curl` không có trên Alpine — bài học này đã trả giá 1 lần ở Chặng 2 (identity/gateway) và lặp lại ở Chặng 3 (market-feed). Từ `aggregation` trở đi, Dockerfile được viết `wget` ngay từ commit đầu tiên, không còn phải tự dò lỗi "unhealthy" nữa. Đây chính là giá trị của việc **ghi lại bẫy vào bài học** (không chỉ sửa code) — người học đi sau tránh được, không phải tự đóng "học phí" giống hệt.'
+- type: command
+  label: Build + lưu mốc bước 4.7
+  content: |
+    docker compose -f infra/docker-compose.yml --env-file infra/.env build aggregation
+    git add aggregation/Dockerfile infra/docker-compose.yml
+    git commit -m "[step-4.7] aggregation: Dockerfile multi-stage + fix healthcheck curl→wget (chủ động, bẫy tái diễn)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-4.7)
+  url: https://github.com/KouTaru99/market-pulse/commit/86df1a2
