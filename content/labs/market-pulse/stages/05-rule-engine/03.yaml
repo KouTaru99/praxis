@@ -1,0 +1,171 @@
+id: re-03
+title: 'rule-engine: REST CRUD + gọi billing kiểm quota — fail-open khi billing chưa tồn tại'
+order: 3
+est_minutes: 40
+commit_ref: 1a54bd9
+goal: 'Viết API tạo/xem/xóa rule cho tenant, với validate tham số theo từng loại rule, và một quyết định thiết kế quan trọng: gọi billing kiểm quota nhưng KHÔNG chặn nếu billing không phản hồi.'
+deliverable: RuleController (3 endpoint) + RuleService + QuotaClient (fail-open) + 5 exception + 5 unit test.
+outcome_preview: 'POST /api/v1/rules tạo được rule ngay từ bây giờ — dù billing (kiểm quota thật) chỉ ra đời ở Chặng 7.'
+blocks:
+- type: prose
+  content: |
+    Đây là bước quan trọng nhất về mặt **tư duy thiết kế hệ phân tán** trong cả lab: `rule-engine` PHẢI gọi sang `billing` để biết tenant còn hạn mức tạo rule không — nhưng `billing` chưa được xây (Chặng 7). Vậy phát triển Chặng 5 có bị chặn lại chờ Chặng 7 xong không?
+
+    Câu trả lời là **fail-open**: nếu gọi `billing` thất bại (timeout, connection refused, hay đơn giản là chưa tồn tại), `rule-engine` coi như "không có thông tin quota, cứ cho phép" — thay vì fail-closed ("không chắc thì từ chối"). Đây là quyết định có chủ đích, không phải sơ suất — callout cuối bước giải thích vì sao.
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/client/QuotaClient.java
+  lang: java
+  content: |
+    @Component
+    public class QuotaClient {
+
+        private final WebClient webClient;
+
+        public QuotaClient(WebClient.Builder builder, @Value("${billing.service.url}") String baseUrl) {
+            this.webClient = builder.baseUrl(baseUrl).build();
+        }
+
+        /**
+         * Trả empty nếu billing chưa phản hồi (timeout / connection refused).
+         * Service xử lý fail-open: empty → cho phép tạo rule.
+         */
+        public Optional<QuotaStatus> check(UUID tenantId) {
+            return webClient.get()
+                    .uri("/internal/quota/{tenantId}", tenantId)
+                    .retrieve()
+                    .bodyToMono(QuotaStatus.class)
+                    .timeout(Duration.ofSeconds(2))
+                    .blockOptional();
+        }
+    }
+
+    // QuotaStatus.java — record khớp response tương lai của billing (Chặng 7)
+    public record QuotaStatus(
+            int activeRules, int maxRules,
+            int alertsThisMonth, int maxAlertsPerMonth,
+            boolean rulesQuotaExceeded, boolean alertsQuotaExceeded
+    ) {}
+- type: prose
+  content: '`RuleService` gói toàn bộ nghiệp vụ: validate symbol + tham số theo loại rule (mỗi loại cần tham số khác nhau — khai trong 1 `Map` tĩnh, không if/else dài dòng), gọi quota, rồi lưu:'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/service/RuleService.java
+  lang: java
+  content: |
+    @Service
+    @Transactional
+    public class RuleService {
+
+        private static final Set<String> VALID_TYPES = Set.of(
+                "PRICE_THRESHOLD", "PERCENT_CHANGE", "VOLUME_SPIKE");
+
+        private static final Map<String, Set<String>> REQUIRED_PARAMS = Map.of(
+                "PRICE_THRESHOLD", Set.of("threshold", "direction"),
+                "PERCENT_CHANGE",  Set.of("percent", "windowMinutes", "direction"),
+                "VOLUME_SPIKE",    Set.of("multiplier")
+        );
+
+        // ... constructor(ruleRepository, quotaClient) ...
+
+        public RuleResponse create(UUID tenantId, CreateRuleRequest req) {
+            validateSymbol(req.symbol());
+            validateTypeAndParams(req.type(), req.params());
+            checkQuota(tenantId);
+
+            Rule rule = new Rule(tenantId, req.symbol(), req.type(), req.params(), req.webhookUrl());
+            Rule saved = ruleRepository.save(rule);
+            // TODO: refresh RuleStore — bước 5.4
+            return toResponse(saved);
+        }
+
+        private void validateTypeAndParams(String type, Map<String, Object> params) {
+            if (!VALID_TYPES.contains(type)) throw new InvalidParamsException();
+            Set<String> required = REQUIRED_PARAMS.get(type);
+            if (params == null || !params.keySet().containsAll(required)) {
+                throw new InvalidParamsException();
+            }
+        }
+
+        private void checkQuota(UUID tenantId) {
+            try {
+                Optional<QuotaStatus> quota = quotaClient.check(tenantId);
+                if (quota.isPresent() && quota.get().rulesQuotaExceeded()) {
+                    long current = ruleRepository.countByTenantIdAndStatus(tenantId, "ACTIVE");
+                    throw new QuotaExceededException(quota.get().maxRules(), (int) current);
+                }
+            } catch (QuotaExceededException e) {
+                throw e;   // đây là lỗi NGHIỆP VỤ thật — phải ném tiếp
+            } catch (Exception e) {
+                log.warn("billing unavailable, skipping quota check: {}", e.getMessage());
+                // nuốt lỗi HẠ TẦNG có chủ đích — đây chính là fail-open
+            }
+        }
+    }
+- type: prose
+  content: 'Endpoint REST + validate bằng Bean Validation (`@Valid`), lỗi map qua `@RestControllerAdvice`:'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/controller/RuleController.java
+  lang: java
+  content: |
+    @RestController
+    @RequestMapping("/api/v1/rules")
+    public class RuleController {
+
+        private final RuleService ruleService;
+
+        @PostMapping
+        public RuleResponse create(@RequestHeader("X-Tenant-Id") UUID tenantId,
+                                    @Valid @RequestBody CreateRuleRequest request) {
+            return ruleService.create(tenantId, request);
+        }
+
+        @GetMapping
+        public List<RuleResponse> list(@RequestHeader("X-Tenant-Id") UUID tenantId) {
+            return ruleService.listByTenant(tenantId);
+        }
+
+        @DeleteMapping("/{id}")
+        @ResponseStatus(HttpStatus.NO_CONTENT)
+        public void delete(@RequestHeader("X-Tenant-Id") UUID tenantId, @PathVariable UUID id) {
+            ruleService.delete(tenantId, id);
+        }
+    }
+
+    // GlobalExceptionHandler map: InvalidSymbol/InvalidParams → 400,
+    // QuotaExceeded → 402 Payment Required, RuleNotFound → 404
+- type: prose
+  content: '5 test kiểm đúng những nhánh khó thấy nhất — đặc biệt `create_quotaClientThrows_failOpenAndSavesRule`, bài kiểm trực tiếp cho quyết định fail-open:'
+- type: code
+  filename: rule-engine/src/test/java/com/marketpulse/ruleengine/service/RuleServiceTest.java (trích)
+  lang: java
+  content: |
+    @Test
+    void create_quotaClientThrows_failOpenAndSavesRule() {
+        when(quotaClient.check(TENANT_ID)).thenThrow(new RuntimeException("Connection refused"));
+        when(ruleRepository.save(any(Rule.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        RuleResponse resp = ruleService.create(TENANT_ID, req);   // KHÔNG ném lỗi
+
+        assertThat(resp).isNotNull();
+        verify(ruleRepository).save(any(Rule.class));   // rule vẫn được lưu
+    }
+
+    @Test
+    void create_quotaExceeded_throws402() {
+        QuotaStatus exceeded = new QuotaStatus(5, 5, 0, 100, true, false);
+        when(quotaClient.check(TENANT_ID)).thenReturn(Optional.of(exceeded));
+
+        assertThatThrownBy(() -> ruleService.create(TENANT_ID, req))
+                .isInstanceOf(QuotaExceededException.class);   // billing CÓ trả lời và nói "vượt" → chặn thật
+    }
+- type: callout
+  variant: warning
+  content: '**Fail-open có đánh đổi thật, không phải "miễn phí".** Nếu `billing` sập kéo dài, tenant có thể tạo rule vượt hạn mức gói cước — về mặt kinh doanh, đây là rủi ro mất doanh thu tạm thời. Nhưng đánh đổi ngược lại (fail-closed) tệ hơn nhiều: `billing` sập 5 phút thì MỌI tenant không tạo được rule nào — một service phụ trợ (billing) làm sập tính năng lõi (rule-engine). Nguyên tắc chung: **fail-open cho tính năng phụ trợ khi hạ tầng phụ trợ đó lỗi, fail-closed cho chính sách bảo mật/toàn vẹn dữ liệu.** Quota là chính sách kinh doanh, không phải toàn vẹn dữ liệu — fail-open hợp lý ở đây.'
+- type: command
+  label: Test + lưu mốc bước 5.3
+  content: |
+    cd rule-engine && ../gradlew test --tests RuleServiceTest
+    git add rule-engine && git commit -m "[step-5.3] rule-engine: Rule CRUD REST (/api/v1/rules) + quota check fail-open (billing chưa có) + 5 unit test"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.3)
+  url: https://github.com/KouTaru99/market-pulse/commit/1a54bd9

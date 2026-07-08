@@ -1,0 +1,118 @@
+id: re-04
+title: 'rule-engine: RuleStore + RollingCandleStore — bộ nhớ đệm cho đánh giá tốc độ cao'
+order: 4
+est_minutes: 30
+commit_ref: 74cc6f3
+goal: 'Viết 2 kho trong bộ nhớ: RuleStore (rule ACTIVE, tra theo symbol) và RollingCandleStore (60 nến gần nhất/symbol) — vì hỏi PostgreSQL mỗi trade là quá chậm.'
+deliverable: RuleStore (load lúc khởi động qua @PostConstruct) + RollingCandleStore (ArrayDeque giới hạn 60) + wire vào RuleService.
+outcome_preview: 'Tra "rule nào đang ACTIVE cho BTCUSDT" giờ là 1 lần đọc ConcurrentHashMap trong bộ nhớ — không phải 1 câu SQL, vì việc này sẽ xảy ra hàng chục lần mỗi giây.'
+blocks:
+- type: prose
+  content: |
+    Đây là quyết định hiệu năng cốt lõi của `rule-engine`: **KHÔNG hỏi PostgreSQL mỗi khi có trade mới.** Với vài trăm trade/giây và hàng nghìn rule, mỗi trade phải kiểm hàng chục rule ngay lập tức — đi qua network + DB mỗi lần là không khả thi. Giải pháp: nạp toàn bộ rule ACTIVE vào bộ nhớ lúc khởi động (`@PostConstruct`), và giữ đồng bộ mỗi khi có thay đổi (tạo/xoá rule qua `RuleService`, hoặc quota vượt mức ở bước 5.7).
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/store/RuleStore.java
+  lang: java
+  content: |
+    @Component
+    public class RuleStore {
+
+        private final RuleRepository ruleRepository;
+
+        // symbol → (ruleId → Rule)
+        private final ConcurrentHashMap<String, ConcurrentHashMap<UUID, Rule>> store = new ConcurrentHashMap<>();
+
+        @PostConstruct
+        public void loadAll() {
+            ruleRepository.findByStatus("ACTIVE").forEach(this::upsert);
+            log.info("RuleStore loaded {} symbols", store.size());
+        }
+
+        /** Thêm/cập nhật rule; nếu không phải ACTIVE thì remove khỏi store. */
+        public void upsert(Rule rule) {
+            if ("ACTIVE".equals(rule.getStatus())) {
+                store.computeIfAbsent(rule.getSymbol(), k -> new ConcurrentHashMap<>())
+                     .put(rule.getId(), rule);
+            } else {
+                remove(rule.getId());
+            }
+        }
+
+        public void remove(UUID ruleId) {
+            store.values().forEach(symbolMap -> symbolMap.remove(ruleId));
+        }
+
+        /** Xóa khỏi store mọi rule của tenant (dùng khi quota vượt mức — bước 5.7). */
+        public void pauseByTenant(UUID tenantId) {
+            store.values().forEach(symbolMap ->
+                symbolMap.values().removeIf(r -> tenantId.equals(r.getTenantId())));
+        }
+
+        /** Bản sao — tránh ConcurrentModificationException khi caller đang lặp qua. */
+        public List<Rule> forSymbol(String symbol, String ruleType) {
+            Map<UUID, Rule> symbolMap = store.get(symbol);
+            if (symbolMap == null) return List.of();
+            return symbolMap.values().stream()
+                    .filter(r -> ruleType.equals(r.getRuleType()) && "ACTIVE".equals(r.getStatus()))
+                    .toList();
+        }
+    }
+- type: prose
+  content: 'PERCENT_CHANGE và VOLUME_SPIKE (bước 5.6) cần nhìn lại một số nến gần nhất — `RollingCandleStore` giữ đúng 60 nến/symbol (đủ cho window tối đa 1 giờ), tự động rơi nến cũ nhất khi đầy:'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/store/RollingCandleStore.java
+  lang: java
+  content: |
+    @Component
+    public class RollingCandleStore {
+
+        private static final int MAX_CANDLES = 60;
+
+        // symbol → deque (oldest ở đầu, newest ở cuối); synchronized trên deque instance
+        private final ConcurrentHashMap<String, ArrayDeque<Candle1mEvent>> store = new ConcurrentHashMap<>();
+
+        public void add(Candle1mEvent candle) {
+            ArrayDeque<Candle1mEvent> deque = store.computeIfAbsent(
+                    candle.symbol(), k -> new ArrayDeque<>(MAX_CANDLES + 1));
+            synchronized (deque) {
+                deque.addLast(candle);
+                if (deque.size() > MAX_CANDLES) {
+                    deque.pollFirst();
+                }
+            }
+        }
+
+        /** Trả bản sao danh sách nến theo thứ tự cũ→mới (openTime tăng dần). */
+        public List<Candle1mEvent> recent(String symbol) {
+            ArrayDeque<Candle1mEvent> deque = store.get(symbol);
+            if (deque == null) return List.of();
+            synchronized (deque) {
+                return new ArrayList<>(deque);
+            }
+        }
+    }
+- type: prose
+  content: 'Nối `RuleStore` vào `RuleService` — từ giờ tạo/xoá rule qua API sẽ phản ánh NGAY vào bộ nhớ đánh giá, không cần đợi service restart:'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/service/RuleService.java (đổi)
+  lang: java
+  content: |
+    Rule saved = ruleRepository.save(rule);
+    ruleStore.upsert(saved);          // trước đây là "// TODO: refresh RuleStore"
+    return toResponse(saved);
+
+    // delete():
+    rule.markDeleted();
+    ruleStore.remove(ruleId);         // trước đây là "// TODO: refresh RuleStore"
+- type: callout
+  variant: warning
+  content: '**Vì sao `ArrayDeque` cần `synchronized` thủ công, trong khi `CandleAggregator` (Chặng 4) chỉ cần `ConcurrentHashMap.compute`?** `ConcurrentHashMap` tự đảm bảo an toàn đa luồng cho THAO TÁC TRÊN MAP (get/put/compute), nhưng `ArrayDeque` bên trong mỗi giá trị hoàn toàn KHÔNG an toàn đa luồng — 2 thread cùng `addLast()` vào 1 deque có thể làm hỏng cấu trúc dữ liệu nội bộ. `computeIfAbsent` chỉ bảo vệ việc "tạo deque nếu chưa có"; mọi thao tác SAU đó lên chính deque đó (add, pollFirst, đọc) phải tự khoá — đây là lỗi rất dễ mắc: tưởng dùng `ConcurrentHashMap` là "xong", nhưng an toàn đa luồng phải xét tới TỪNG thao tác, không chỉ tầng ngoài cùng.'
+- type: command
+  label: Lưu mốc bước 5.4
+  content: |
+    git add rule-engine
+    git commit -m "[step-5.4] rule-engine: RuleStore in-memory (load ACTIVE) + RollingCandleStore (60 nến/symbol) + wire RuleService"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/74cc6f3

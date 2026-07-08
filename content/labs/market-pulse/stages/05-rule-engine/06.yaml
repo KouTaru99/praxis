@@ -1,0 +1,125 @@
+id: re-06
+title: 'rule-engine: PercentChangeEvaluator + VolumeSpikeEvaluator — đánh giá theo nến'
+order: 6
+est_minutes: 35
+commit_ref: 170c23e
+goal: 'Viết 2 evaluator còn lại — cả 2 đều cần NHÌN LẠI lịch sử nến (RollingCandleStore của bước 5.4), khác PRICE_THRESHOLD chỉ cần 1 trade đơn lẻ.'
+deliverable: PercentChangeEvaluator (so sánh close hiện tại vs N phút trước) + VolumeSpikeEvaluator (so baseline trung bình) + 9 unit test.
+outcome_preview: '2 loại rule còn lại hoạt động: "báo khi giá tăng/giảm X% trong N phút" và "báo khi khối lượng đột biến gấp X lần trung bình".'
+blocks:
+- type: prose
+  content: '`PERCENT_CHANGE` so sánh giá đóng cửa (close) của nến MỚI NHẤT với nến CÁCH ĐÓ `windowMinutes` phút. Công thức % thay đổi kinh điển: `(hiện tại − quá khứ) / quá khứ × 100`:'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/evaluator/PercentChangeEvaluator.java
+  lang: java
+  content: |
+    @Component
+    public class PercentChangeEvaluator {
+
+        /**
+         * params: percent (tối thiểu, luôn dương), windowMinutes (số nến nhìn lùi),
+         *         direction: "UP" (pct ≥ percent) | "DOWN" (pct ≤ -percent)
+         * recentCandles phải sắp cũ → mới. Cần ít nhất windowMinutes + 1 nến.
+         */
+        public Optional<AlertTrigger> evaluate(Rule rule, List<Candle1mEvent> recentCandles) {
+            BigDecimal percent = new BigDecimal(rule.getParams().get("percent").toString());
+            int windowMinutes = Integer.parseInt(rule.getParams().get("windowMinutes").toString());
+            String direction = rule.getParams().get("direction").toString();
+
+            if (recentCandles.size() < windowMinutes + 1) {
+                return Optional.empty();   // chưa đủ lịch sử để so sánh
+            }
+
+            Candle1mEvent newest = recentCandles.get(recentCandles.size() - 1);
+            Candle1mEvent past   = recentCandles.get(recentCandles.size() - 1 - windowMinutes);
+
+            BigDecimal closeNow  = new BigDecimal(newest.close());
+            BigDecimal closePast = new BigDecimal(past.close());
+            if (closePast.compareTo(BigDecimal.ZERO) == 0) return Optional.empty();
+
+            BigDecimal pct = closeNow.subtract(closePast)
+                    .divide(closePast, 8, RoundingMode.HALF_UP)
+                    .multiply(BigDecimal.valueOf(100))
+                    .setScale(4, RoundingMode.HALF_UP);
+
+            boolean triggered = switch (direction) {
+                case "UP"   -> pct.compareTo(percent) >= 0;
+                case "DOWN" -> pct.compareTo(percent.negate()) <= 0;
+                default     -> false;
+            };
+            return triggered ? Optional.of(new AlertTrigger(rule, pct.toPlainString())) : Optional.empty();
+        }
+    }
+- type: prose
+  content: '`VOLUME_SPIKE` so khối lượng nến MỚI NHẤT với **trung bình các nến còn lại** (baseline) — không so với 1 nến cố định, vì "bình thường" cần nhìn nhiều điểm dữ liệu, không phải 1:'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/evaluator/VolumeSpikeEvaluator.java
+  lang: java
+  content: |
+    @Component
+    public class VolumeSpikeEvaluator {
+
+        /**
+         * params.multiplier – hệ số nhân so với baseline.
+         * baseline = trung bình volume của MỌI nến ngoại trừ nến mới nhất (tối đa 59 nến).
+         * Trigger khi volume nến mới nhất ≥ multiplier × baseline.
+         */
+        public Optional<AlertTrigger> evaluate(Rule rule, List<Candle1mEvent> recentCandles) {
+            if (recentCandles.size() < 2) return Optional.empty();
+
+            BigDecimal multiplier = new BigDecimal(rule.getParams().get("multiplier").toString());
+            Candle1mEvent current = recentCandles.get(recentCandles.size() - 1);
+            List<Candle1mEvent> baseline = recentCandles.subList(0, recentCandles.size() - 1);
+
+            BigDecimal totalVolume = baseline.stream()
+                    .map(c -> new BigDecimal(c.volume()))
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal avgVolume = totalVolume.divide(
+                    BigDecimal.valueOf(baseline.size()), 8, RoundingMode.HALF_UP);
+            if (avgVolume.compareTo(BigDecimal.ZERO) == 0) return Optional.empty();
+
+            BigDecimal currentVolume = new BigDecimal(current.volume());
+            boolean triggered = currentVolume.compareTo(multiplier.multiply(avgVolume)) >= 0;
+            return triggered ? Optional.of(new AlertTrigger(rule, currentVolume.toPlainString())) : Optional.empty();
+        }
+    }
+- type: prose
+  content: '9 test — 5 cho PercentChange (gồm biên "chưa đủ lịch sử" và "chia cho 0"), 4 cho VolumeSpike:'
+- type: code
+  filename: 2 test file (trích các ca biên đáng chú ý)
+  lang: java
+  content: |
+    // PercentChangeEvaluatorTest
+    @Test
+    void insufficientCandles_returnsEmpty() {
+        // window=5, chỉ có 5 nến → cần 6
+        List<Candle1mEvent> c = candles(5, "100", "100", "100", "100", "105");
+        assertThat(evaluator.evaluate(rule("3", 5, "UP"), c)).isEmpty();
+    }
+
+    @Test
+    void pastCloseZero_returnsEmpty() {
+        // chia cho 0 phải trả rỗng, KHÔNG ném ArithmeticException
+        List<Candle1mEvent> c = candles(6, "0", "0", "0", "0", "0", "100");
+        assertThat(evaluator.evaluate(rule("5", 5, "UP"), c)).isEmpty();
+    }
+
+    // VolumeSpikeEvaluatorTest
+    @Test
+    void currentVolumeExceedsMultiplierBaseline_triggers() {
+        // baseline avg = (10+10+10)/3 = 10; current = 50 ≥ 3×10=30
+        List<Candle1mEvent> candles = List.of(candle("10"), candle("10"), candle("10"), candle("50"));
+        assertThat(evaluator.evaluate(rule("3"), candles)).isPresent();
+    }
+- type: callout
+  variant: warning
+  content: '**`pastCloseZero_returnsEmpty` không phải test thừa cho một tình huống "không thể xảy ra".** Nến chưa từng có giao dịch nào (`tradeCount=0`) về lý thuyết không nên tồn tại theo cách `CandleAggregator` (Chặng 4) hoạt động — nhưng dữ liệu thị trường thật đôi khi có nến giá 0 do lỗi nguồn hoặc symbol mới niêm yết chưa đủ thanh khoản. Chia cho 0 trong Java với `BigDecimal` ném `ArithmeticException` — nếu không kiểm trước, MỘT nến bất thường sẽ làm sập toàn bộ vòng đánh giá cho symbol đó, ảnh hưởng tới MỌI rule khác đang chờ nến kế tiếp.'
+- type: command
+  label: Test + lưu mốc bước 5.6
+  content: |
+    cd rule-engine && ../gradlew test --tests "*Evaluator*"
+    git add rule-engine && git commit -m "[step-5.6] rule-engine: PercentChange + VolumeSpike evaluators (candle-driven, BigDecimal) + 9 unit test"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.6)
+  url: https://github.com/KouTaru99/market-pulse/commit/170c23e

@@ -1,0 +1,74 @@
+id: re-05
+title: 'rule-engine: PriceThresholdEvaluator — loại rule đơn giản nhất, đánh giá theo trade'
+order: 5
+est_minutes: 25
+commit_ref: a84d44b
+goal: 'Viết evaluator đầu tiên trong 3 loại: PRICE_THRESHOLD — khớp mỗi khi 1 trade chạm/vượt ngưỡng giá.'
+deliverable: AlertTrigger (record kết quả) + PriceThresholdEvaluator + 6 unit test.
+outcome_preview: 'Đưa vào 1 Rule + 1 TradeEvent, nhận lại Optional<AlertTrigger> — có giá trị nếu khớp điều kiện, rỗng nếu không.'
+blocks:
+- type: prose
+  content: |
+    3 loại rule sẽ có 3 evaluator riêng (bước 5.5, 5.6), nhưng cùng chung 1 "hợp đồng": nhận `Rule` (mang `params` JSONB) + dữ liệu thị trường, trả `Optional<AlertTrigger>`. `PRICE_THRESHOLD` đơn giản nhất — chỉ cần TỪNG trade riêng lẻ, không cần nhìn lịch sử.
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/evaluator/AlertTrigger.java
+  lang: java
+  content: |
+    /** Kết quả khi một rule khớp điều kiện; mang theo giá trị tại thời điểm trigger. */
+    public record AlertTrigger(Rule rule, String triggerValue) {}
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/evaluator/PriceThresholdEvaluator.java
+  lang: java
+  content: |
+    @Component
+    public class PriceThresholdEvaluator {
+
+        /**
+         * params.threshold: giá ngưỡng (String → BigDecimal)
+         * params.direction: "BELOW" (price ≤ threshold) | "ABOVE" (price ≥ threshold)
+         */
+        public Optional<AlertTrigger> evaluate(Rule rule, TradeEvent trade) {
+            BigDecimal threshold = new BigDecimal(rule.getParams().get("threshold").toString());
+            String direction = rule.getParams().get("direction").toString();
+            BigDecimal price = new BigDecimal(trade.price());
+
+            boolean triggered = switch (direction) {
+                case "BELOW" -> price.compareTo(threshold) <= 0;
+                case "ABOVE" -> price.compareTo(threshold) >= 0;
+                default -> false;
+            };
+
+            return triggered
+                    ? Optional.of(new AlertTrigger(rule, trade.price()))
+                    : Optional.empty();
+        }
+    }
+- type: prose
+  content: '6 test phủ đủ 3 tình huống biên (dưới/bằng/trên ngưỡng) × 2 hướng (BELOW/ABOVE) — chú ý cả 2 hướng đều TRIGGER khi giá đúng bằng ngưỡng (`<=`/`>=`, không phải `<`/`>`):'
+- type: code
+  filename: rule-engine/src/test/java/com/marketpulse/ruleengine/evaluator/PriceThresholdEvaluatorTest.java (trích)
+  lang: java
+  content: |
+    @Test
+    void below_priceEqualThreshold_triggers() {
+        Optional<AlertTrigger> result = evaluator.evaluate(rule("50000", "BELOW"), trade("50000"));
+        assertThat(result).isPresent();   // == ngưỡng vẫn tính là "đã chạm"
+    }
+
+    @Test
+    void below_priceAboveThreshold_noTrigger() {
+        Optional<AlertTrigger> result = evaluator.evaluate(rule("50000", "BELOW"), trade("51000"));
+        assertThat(result).isEmpty();
+    }
+- type: callout
+  variant: info
+  content: '**Vì sao là `<=`/`>=` chứ không phải `<`/`>`?** Đặt mình vào vị trí người dùng: tạo rule "báo khi BTC xuống dưới hoặc bằng 50000" — nếu giá đi thẳng từ 50001 xuống đúng 50000 rồi bật lên, một điều kiện `<` (strict) sẽ BỎ LỠ đúng khoảnh khắc chạm ngưỡng đó. Với cảnh báo tài chính, bỏ lỡ một lần chạm ngưỡng tệ hơn nhiều so với báo thừa — thiên về nhạy (`<=`/`>=`) là lựa chọn đúng ngữ cảnh.'
+- type: command
+  label: Test + lưu mốc bước 5.5
+  content: |
+    cd rule-engine && ../gradlew test --tests PriceThresholdEvaluatorTest
+    git add rule-engine && git commit -m "[step-5.5] rule-engine: PriceThresholdEvaluator (BELOW/ABOVE, trade-driven) + 6 unit test"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/a84d44b

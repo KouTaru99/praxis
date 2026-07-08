@@ -1,0 +1,5 @@
+id: rule-engine
+order: 5
+title: Đánh giá rule & bắn cảnh báo
+description: 'Service rule-engine cho tenant tạo rule cảnh báo (ngưỡng giá, % thay đổi, đột biến khối lượng), đánh giá liên tục theo trade/nến thời gian thực, và bắn AlertTriggeredEvent khi khớp.'
+part: B · Luồng dữ liệu thời gian thực

@@ -1,0 +1,72 @@
+id: re-08
+title: 'rule-engine: đóng gói Docker + mở route gateway + vá bug createdAt null'
+order: 8
+est_minutes: 25
+commit_ref: 6109f4f
+goal: 'Dockerfile đúng khuôn, mở route /api/v1/rules/** ở gateway (đã để TODO từ Chặng 2), và vá 1 bug thật: response tạo rule trả createdAt = null.'
+deliverable: rule-engine/Dockerfile + gateway route rule-engine-rules + RuleService.create dùng saveAndFlush.
+outcome_preview: 'Gọi POST /api/v1/rules qua gateway (cổng 8080, không cần biết rule-engine chạy ở 8083) — và response trả đủ createdAt, không còn null.'
+blocks:
+- type: prose
+  content: 'Dockerfile theo khuôn đã ổn định từ Chặng 3-4, không có gì mới. Điểm đáng chú ý nằm ở 2 thay đổi còn lại của bước này.'
+- type: code
+  filename: rule-engine/Dockerfile (khuôn quen thuộc)
+  lang: dockerfile
+  content: |
+    FROM eclipse-temurin:21-jdk AS builder
+    # ... COPY gradlew, gradle/, build.gradle.kts của mọi subproject ...
+    COPY common/src      common/src
+    COPY rule-engine/src rule-engine/src
+    RUN --mount=type=cache,target=/root/.gradle chmod +x gradlew && ./gradlew :rule-engine:bootJar --no-daemon -x test
+
+    FROM eclipse-temurin:21-jre-alpine
+    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+    WORKDIR /app
+    COPY --from=builder /workspace/rule-engine/build/libs/rule-engine.jar app.jar
+    USER appuser
+    EXPOSE 8083
+    ENTRYPOINT ["java", "-Xmx256m", "-jar", "app.jar"]
+- type: prose
+  content: 'Chặng 2 để lại `# TODO Chặng 5: /api/v1/rules/** → rule-engine:8083` trong cấu hình gateway. Giờ điền đúng lời hứa đó:'
+- type: code
+  filename: gateway/src/main/resources/application.yml (thêm)
+  lang: yaml
+  content: |
+    spring:
+      cloud:
+        gateway:
+          routes:
+            - id: identity-keys
+              uri: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/keys/**
+            - id: rule-engine-rules
+              uri: ${RULE_ENGINE_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/v1/rules/**
+            # TODO Chặng 6: /api/v1/alerts/** → alert-delivery:8084
+            # TODO Chặng 7: /api/v1/usage/** → billing:8085
+- type: prose
+  content: 'Bug thật gặp lúc verify smoke-test (kể ở đây đúng như đã xảy ra): response `POST /api/v1/rules` trả `createdAt: null`, dù cột DB có `DEFAULT NOW()` và entity có `@CreationTimestamp`. Nguyên nhân: Hibernate CHỈ set `@CreationTimestamp` lúc thật sự `flush()` (đẩy SQL xuống DB) — mà theo mặc định, `save()` trong 1 transaction có thể hoãn flush tới cuối transaction, sau khi `RuleService` đã đọc `saved.getCreatedAt()` để build response:'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/service/RuleService.java (sửa 1 dòng)
+  lang: java
+  content: |
+    Rule rule = new Rule(tenantId, req.symbol(), req.type(), req.params(), req.webhookUrl());
+    // saveAndFlush: @CreationTimestamp chỉ set khi flush → cần flush để response có createdAt (không null)
+    Rule saved = ruleRepository.saveAndFlush(rule);
+    ruleStore.upsert(saved);
+    return toResponse(saved);
+- type: callout
+  variant: warning
+  content: '**`save()` vs `saveAndFlush()` — khác biệt tưởng nhỏ, hậu quả thấy ngay ở response API.** `save()` đưa entity vào "persistence context" của Hibernate nhưng KHÔNG bắt buộc chạy SQL ngay — Hibernate tối ưu bằng cách gom nhiều thay đổi rồi flush 1 lần cuối transaction. Với hầu hết trường hợp điều này vô hại. Nhưng khi code đọc lại giá trị DO DATABASE SINH RA (như `@CreationTimestamp`, hay `SERIAL` id trong vài cấu hình) để trả về NGAY trong cùng request — phải `saveAndFlush()` để chắc chắn giá trị đó đã tồn tại. Đây là loại bug chỉ lộ ra khi TEST THẬT qua HTTP (đọc response JSON), không lộ qua unit test dùng mock repository (bước 5.3 mock `save()` trả thẳng object truyền vào, nên `createdAt` "có vẻ" đúng dù logic thật đang sai).'
+- type: command
+  label: Build + lưu mốc bước 5.8
+  content: |
+    docker compose -f infra/docker-compose.yml --env-file infra/.env build rule-engine
+    git add rule-engine gateway infra/docker-compose.yml
+    git commit -m "[step-5.8] rule-engine: Dockerfile + fix healthcheck curl→wget + gateway route /api/v1/rules + fix createdAt null (saveAndFlush)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.8)
+  url: https://github.com/KouTaru99/market-pulse/commit/6109f4f

@@ -1,0 +1,82 @@
+id: re-09
+title: 'Milestone Chặng 5: smoke-test 5 ca — tạo rule thật, trade thật khớp, alert thật xuất hiện'
+order: 9
+est_minutes: 30
+commit_ref: c3001af
+goal: 'Chạy trọn luồng: tạo 1 rule qua REST API, chờ trade thật khớp ngưỡng, xác nhận AlertTriggeredEvent xuất hiện đúng schema trên RabbitMQ. Đây là milestone khép toàn bộ Phần B (Chặng 3-5) của lab.'
+deliverable: scripts/smoke-ch5.sh (5 ca) + docs/smoke-ch5.md.
+outcome_preview: '5/5 PASS — từ trade thô ở Chặng 3, qua nến ở Chặng 4, tới rule tự tạo ở Chặng 5: một cảnh báo thị trường thật đã được sinh ra tự động, đầu-cuối.'
+blocks:
+- type: prose
+  content: 'Milestone Chặng 5 khác 2 milestone trước ở một điểm: nó KHÔNG chỉ đọc dữ liệu có sẵn, mà chủ động **tạo dữ liệu qua API** (1 rule ngưỡng giá rất dễ khớp: `BELOW 1000000` — BTC chưa từng và sẽ khó chạm mức đó, nên mọi trade tới đều "dưới ngưỡng", khớp gần như ngay lập tức, tiện cho smoke-test tự động không cần chờ điều kiện thị trường thật):'
+- type: command
+  label: Bật cả 3 chặng + chạy smoke
+  content: |
+    docker compose -f infra/docker-compose.yml --env-file infra/.env --profile feed up -d --build
+    docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build rule-engine rule-engine-db
+    bash scripts/smoke-ch5.sh
+- type: prose
+  content: '5 ca kiểm — 2 ca đầu kiểm việc TẠO rule qua API, 2 ca tiếp kiểm việc rule ĐÁNH GIÁ đúng trên dữ liệu thật:'
+- type: code
+  filename: (bảng tham khảo — không phải file thật)
+  lang: markdown
+  content: |
+    | Ca   | Kiểm                                    | Kỳ vọng                                    |
+    |------|-------------------------------------------|---------------------------------------------|
+    | TC1  | `rule-engine` container                   | `healthy`                                    |
+    | TC2  | POST `/api/v1/rules` (PRICE_THRESHOLD)    | 200, `status=ACTIVE`                         |
+    | TC2b | Response tạo rule                         | `createdAt` không null (vá ở bước 5.8)       |
+    | TC3  | Exchange `market-pulse.alerts`            | trade khớp ngưỡng → AlertTriggeredEvent      |
+    | TC4  | Định dạng alert                           | đủ field + `ruleType=PRICE_THRESHOLD`        |
+- type: code
+  filename: scripts/smoke-ch5.sh (trích — bind queue TRƯỚC khi tạo rule)
+  lang: bash
+  content: |
+    # Bind queue tạm vào exchange alerts TRƯỚC khi tạo rule — tránh race condition
+    # (nếu bind SAU, alert đầu tiên có thể đã bắn và mất trước khi queue kịp nghe)
+    curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X PUT "${RMQ_API}/queues/%2F/${VQUEUE}" \
+        -H "content-type: application/json" -d '{"durable":false}' >/dev/null 2>&1
+    curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/bindings/%2F/e/${ALERTS_EXCHANGE}/q/${VQUEUE}" \
+        -H "content-type: application/json" -d '{"routing_key":"alert"}' >/dev/null 2>&1
+
+    # TC2: tạo rule PRICE_THRESHOLD ngưỡng cực cao → khớp ngay trade đầu tiên
+    create=$(curl -s -X POST "${RE_URL}/api/v1/rules" \
+        -H "X-Tenant-Id: ${TENANT_ID}" -H "Content-Type: application/json" \
+        -d '{"symbol":"BTCUSDT","type":"PRICE_THRESHOLD","params":{"threshold":"1000000","direction":"BELOW"},"webhookUrl":"https://example.com/hook"}')
+- type: callout
+  variant: tip
+  content: '**"Bind queue TRƯỚC khi tạo rule" là chi tiết nhỏ nhưng phá vỡ smoke-test nếu làm ngược thứ tự.** RabbitMQ chỉ giữ message cho consumer ĐÃ TỒN TẠI tại thời điểm publish (trừ khi cấu hình thêm queue bền + TTL đặc biệt). Nếu script tạo rule trước, rồi mới bind queue smoke-test, alert đầu tiên (thường bắn trong vài giây do ngưỡng cực dễ khớp) sẽ trôi qua exchange mà "không ai đang nghe" — mất vĩnh viễn, và smoke-test chờ mãi không thấy gì. Thứ tự "nghe trước, hành động sau" là nguyên tắc chung khi test hệ message-driven, không riêng gì lab này.'
+- type: callout
+  variant: warning
+  content: '**Nếu `market-feed` đang chạy `replay` (mạng chặn Binance) — smoke-test này CŨNG chạy đúng, không cần sửa gì.** Đây là lần thứ ba trong lab nhắc lại điểm này (Chặng 3 → 4 → 5): vì mọi service phía sau `market-feed` chỉ biết tới `TradeEvent`/`Candle1mEvent` qua RabbitMQ, không biết nguồn gốc dữ liệu — một quyết định thiết kế ở Chặng 3 (tách `BinanceWsClient` khỏi `LiveFeed`/`RecordFeed`/`ReplayFeed`) mang lại lợi ích xuyên suốt 3 chặng liên tiếp.'
+- type: prose
+  content: 'Kết quả mong đợi:'
+- type: code
+  filename: (output thật)
+  lang: text
+  content: |
+    === Smoke test Chặng 5 — rule-engine: rule → trade khớp → alert ===
+
+    PASS  TC1  rule-engine container healthy      → healthy
+    PASS  TC2  POST /api/v1/rules → status ACTIVE
+    PASS  TC2b response có createdAt (không null)  → yes
+          [chờ tối đa ~20s cho trade khớp ngưỡng...]
+    PASS  TC3  AlertTriggeredEvent xuất hiện       → yes  [+4s]
+    PASS  TC4  alert đúng schema AlertTriggeredEvent → ok
+
+    === Kết quả: PASS=5  FAIL=0 ===
+    PASS  Chặng 5 milestone — rule-engine khớp rule & bắn alert đúng
+- type: prose
+  content: |
+    **Chặng 3-5 khép lại Phần B — luồng dữ liệu thời gian thực trọn vẹn:** Binance thật → trade chuẩn hoá → nến 1 phút → rule tự tạo → cảnh báo tự động. Ba service (`market-feed`, `aggregation`, `rule-engine`) không service nào biết chi tiết nội bộ của service kia — chỉ biết "hợp đồng" qua RabbitMQ. Đây chính là kiến trúc message-driven microservices đúng nghĩa, không phải chỉ là "chia code ra nhiều thư mục".
+
+    Phần C (Chặng 6-7: alert-delivery gửi webhook thật + billing tính quota thật) sẽ khép 2 khoảng trống đang để ngỏ: alert hiện mới dừng ở RabbitMQ (chưa ai gửi đi), và quota hiện luôn fail-open (chưa ai từ chối).
+- type: command
+  label: Lưu mốc bước 5.9 — kết thúc Chặng 5, khép Phần B
+  content: |
+    git add docs/smoke-ch5.md scripts/smoke-ch5.sh
+    git commit -m "[step-5.9] smoke-ch5.sh: 5 ca (healthy/create-rule/createdAt/alert-triggered/schema) + docs — milestone Chặng 5"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.9)
+  url: https://github.com/KouTaru99/market-pulse/commit/c3001af

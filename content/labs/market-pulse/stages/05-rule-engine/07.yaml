@@ -1,0 +1,155 @@
+id: re-07
+title: 'rule-engine: ráp mọi mảnh — consumer, chống spam, bắn alert, xử lý quota vượt mức'
+order: 7
+est_minutes: 40
+commit_ref: f49ebdb
+goal: 'Nối RuleStore + 3 evaluator vào 2 consumer (trade, nến), thêm cơ chế cooldown chống bắn alert liên tục, và xử lý sự kiện quota vượt mức từ billing (tương lai).'
+deliverable: TradeConsumer + CandleConsumer + AlertCooldown + AlertPublisher + QuotaConsumer.
+outcome_preview: 'Đây là bước khép kín toàn bộ Chặng 5: 1 trade khớp ngưỡng giá → 1 AlertTriggeredEvent xuất hiện trên market-pulse.alerts, không sớm hơn 60 giây kể từ lần bắn trước.'
+blocks:
+- type: diagram
+  content: |
+    flowchart TD
+      T[TradeEvent] --> TC[TradeConsumer]
+      C[Candle1mEvent] --> CC[CandleConsumer]
+      TC --> E1[PriceThresholdEvaluator]
+      CC --> E2[PercentChangeEvaluator]
+      CC --> E3[VolumeSpikeEvaluator]
+      E1 & E2 & E3 -- khớp --> CD{AlertCooldown<br/>shouldFire?}
+      CD -- yes --> AP[AlertPublisher]
+      CD -- no --> Drop[bỏ qua — còn trong cooldown]
+      AP --> EX[(market-pulse.alerts)]
+- type: prose
+  content: |
+    Mọi mảnh trước đó (RuleStore, RollingCandleStore, 3 evaluator) giờ ráp lại thành 2 consumer: `TradeConsumer` (nghe `market-pulse.trades`, chỉ chạy `PriceThresholdEvaluator`) và `CandleConsumer` (nghe `market-pulse.candles`, chạy `PercentChangeEvaluator` + `VolumeSpikeEvaluator`).
+
+    Nhưng ráp thẳng "khớp → bắn alert ngay" sẽ tạo ra vấn đề: một rule `BELOW 50000` khi giá đang ở 49000 sẽ khớp **mỗi trade tiếp theo** — với market-feed nhận vài chục trade/giây, đó là spam alert không kiểm soát được. Cần `AlertCooldown`.
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/alert/AlertCooldown.java
+  lang: java
+  content: |
+    /**
+     * Chống spam alert: sau khi một rule fire, chặn fire lại trong cooldown-ms.
+     * compute() của ConcurrentHashMap đảm bảo atomic read-then-write → không double-fire.
+     */
+    @Component
+    public class AlertCooldown {
+
+        @Value("${rule-engine.alert.cooldown-ms:60000}")
+        private long cooldownMs;
+
+        private final ConcurrentHashMap<UUID, Long> lastFired = new ConcurrentHashMap<>();
+
+        public boolean shouldFire(UUID ruleId, long nowMs) {
+            boolean[] fired = {false};
+            lastFired.compute(ruleId, (k, last) -> {
+                if (last == null || nowMs - last >= cooldownMs) {
+                    fired[0] = true;
+                    return nowMs;
+                }
+                return last;   // vẫn trong cooldown — giữ nguyên mốc cũ
+            });
+            return fired[0];
+        }
+    }
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/consumer/TradeConsumer.java + CandleConsumer.java
+  lang: java
+  content: |
+    @Component
+    public class TradeConsumer {
+        // constructor(ruleStore, evaluator, cooldown, publisher) ...
+
+        @RabbitListener(queues = RabbitConfig.TRADES_QUEUE)
+        public void onTrade(TradeEvent trade) {
+            long now = System.currentTimeMillis();
+            ruleStore.forSymbol(trade.symbol(), "PRICE_THRESHOLD").forEach(rule ->
+                evaluator.evaluate(rule, trade).ifPresent(trigger -> {
+                    if (cooldown.shouldFire(rule.getId(), now)) {
+                        publisher.publish(trigger.rule(), trigger.triggerValue());
+                    }
+                })
+            );
+        }
+    }
+
+    @Component
+    public class CandleConsumer {
+        // constructor(candleStore, ruleStore, percentChangeEvaluator, volumeSpikeEvaluator, cooldown, publisher) ...
+
+        @RabbitListener(queues = RabbitConfig.CANDLES_QUEUE)
+        public void onCandle(Candle1mEvent candle) {
+            candleStore.add(candle);
+            List<Candle1mEvent> recent = candleStore.recent(candle.symbol());
+            long now = System.currentTimeMillis();
+
+            ruleStore.forSymbol(candle.symbol(), "PERCENT_CHANGE").forEach(rule ->
+                percentChangeEvaluator.evaluate(rule, recent).ifPresent(trigger -> {
+                    if (cooldown.shouldFire(rule.getId(), now)) publisher.publish(trigger.rule(), trigger.triggerValue());
+                })
+            );
+            ruleStore.forSymbol(candle.symbol(), "VOLUME_SPIKE").forEach(rule ->
+                volumeSpikeEvaluator.evaluate(rule, recent).ifPresent(trigger -> {
+                    if (cooldown.shouldFire(rule.getId(), now)) publisher.publish(trigger.rule(), trigger.triggerValue());
+                })
+            );
+        }
+    }
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/alert/AlertPublisher.java
+  lang: java
+  content: |
+    @Component
+    public class AlertPublisher {
+
+        private final RabbitTemplate rabbitTemplate;
+
+        public void publish(Rule rule, String triggerValue) {
+            AlertTriggeredEvent event = new AlertTriggeredEvent(
+                    UUID.randomUUID().toString(), rule.getId().toString(), rule.getTenantId().toString(),
+                    rule.getSymbol(), rule.getRuleType(),
+                    OffsetDateTime.now(ZoneOffset.UTC).toString(),
+                    triggerValue, rule.getWebhookUrl()
+            );
+            rabbitTemplate.convertAndSend(RabbitConfig.ALERTS_EXCHANGE, RabbitConfig.ALERTS_ROUTING_KEY, event);
+            log.info("Alert triggered: rule={} symbol={} value={}", rule.getId(), rule.getSymbol(), triggerValue);
+        }
+    }
+- type: prose
+  content: 'Mảnh cuối: `QuotaConsumer` — khi `billing` (Chặng 7) phát hiện tenant vượt hạn mức, nó sẽ publish `QuotaExceededEvent` vào `market-pulse.quota`. `rule-engine` nghe sự kiện này, chuyển mọi rule ACTIVE của tenant đó sang `EVAL_PAUSED` (cả DB lẫn bộ nhớ):'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/consumer/QuotaConsumer.java
+  lang: java
+  content: |
+    @Component
+    public class QuotaConsumer {
+
+        @RabbitListener(queues = RabbitConfig.QUOTA_QUEUE)
+        @Transactional
+        public void onQuotaExceeded(QuotaExceededEvent event) {
+            UUID tenantId = UUID.fromString(event.tenantId());
+            log.warn("Quota exceeded: tenant={} type={} current={} limit={}",
+                    tenantId, event.quotaType(), event.currentCount(), event.limit());
+
+            ruleRepository.findByTenantIdAndStatusNot(tenantId, "DELETED").stream()
+                    .filter(r -> "ACTIVE".equals(r.getStatus()))
+                    .forEach(r -> { r.markEvalPaused(); ruleRepository.save(r); });
+
+            ruleStore.pauseByTenant(tenantId);   // dừng đánh giá NGAY, không đợi DB round-trip lần sau
+        }
+    }
+- type: callout
+  variant: info
+  content: '**`QuotaConsumer` hoạt động bình thường dù chưa có ai publish vào `market-pulse.quota` — đó chính là điểm hay của kiến trúc message-driven.** Chặng 5 declare consumer sẵn sàng nghe; Chặng 7 (billing) chỉ cần publish đúng `QuotaExceededEvent` vào đúng exchange, không cần biết `rule-engine` xử lý message đó thế nào, cũng không cần `rule-engine` deploy lại.'
+- type: callout
+  variant: warning
+  content: '**Vì sao `ruleStore.pauseByTenant()` bên cạnh việc lưu DB — không phải chỉ 1 trong 2?** Lưu DB đảm bảo trạng thái sống sót qua restart (nguồn sự thật lâu dài). Nhưng `RuleStore` trong bộ nhớ là bản sao đang dùng THẬT SỰ để đánh giá mỗi trade — nếu chỉ lưu DB mà không cập nhật bộ nhớ, rule của tenant đã vượt quota vẫn tiếp tục được đánh giá (và bắn alert) cho tới lần restart tiếp theo. Hai bước, hai vai trò khác nhau: DB = bền vững, RuleStore = tốc độ.'
+- type: command
+  label: Lưu mốc bước 5.7
+  content: |
+    git add rule-engine
+    git commit -m "[step-5.7] rule-engine: Trade/Candle consumers + AlertPublisher + cooldown chống spam + QuotaExceeded consumer (EVAL_PAUSED)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.7)
+  url: https://github.com/KouTaru99/market-pulse/commit/f49ebdb

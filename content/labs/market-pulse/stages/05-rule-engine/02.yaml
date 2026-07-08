@@ -1,0 +1,155 @@
+id: re-02
+title: 'rule-engine: entity Rule (JSONB) + repository + topology 4 exchange'
+order: 2
+est_minutes: 30
+commit_ref: 873c692
+goal: 'Ánh xạ bảng rules sang entity JPA đọc/ghi JSONB tự nhiên như Map, và khai đủ 4 exchange rule-engine sẽ cần: nghe trade, nghe nến, nghe quota, phát alert.'
+deliverable: Rule entity + RuleRepository (4 query method) + RabbitConfig (4 exchange, 3 queue, 3 binding).
+outcome_preview: 'rule-engine đã "nghe" được cả 3 nguồn (trade, nến, quota) và có "cửa phát" alert — dù chưa có logic xử lý gì (các bước sau lo).'
+blocks:
+- type: diagram
+  content: |
+    flowchart LR
+      T[(market-pulse.trades<br/>fanout)] --> RE[rule-engine]
+      C[(market-pulse.candles<br/>topic *.1m)] --> RE
+      Q[(market-pulse.quota<br/>direct)] --> RE
+      RE -- alert --> A[(market-pulse.alerts<br/>direct)]
+- type: prose
+  content: |
+    `rule-engine` là service nghe NHIỀU nhất trong toàn hệ thống: trade thô (đánh giá rule PRICE_THRESHOLD theo thời gian thực), nến 1 phút (đánh giá PERCENT_CHANGE/VOLUME_SPIKE), và sự kiện quota vượt mức (từ `billing`, Chặng 7 — tạm thời chưa ai publish vào đây, nhưng khai trước để không phải sửa topology sau).
+
+    `Jackson2JsonMessageConverter` giờ cần khai `trustedPackages` — kỹ thuật đã học ở Chặng 4 bước 4.6, lặp lại vì `rule-engine` cũng deserialize các event kiểu record của package `com.marketpulse`.
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/domain/Rule.java
+  lang: java
+  content: |
+    @Entity
+    @Table(name = "rules")
+    public class Rule {
+
+        @Id
+        @GeneratedValue(strategy = GenerationType.UUID)
+        private UUID id;
+
+        @Column(name = "tenant_id", nullable = false)
+        private UUID tenantId;
+
+        @Column(nullable = false, length = 20)
+        private String symbol;
+
+        @Column(name = "rule_type", nullable = false, length = 30)
+        private String ruleType;
+
+        @JdbcTypeCode(SqlTypes.JSON)
+        @Column(columnDefinition = "jsonb", nullable = false)
+        private Map<String, Object> params;
+
+        @Column(name = "webhook_url", nullable = false, length = 500)
+        private String webhookUrl;
+
+        @Column(nullable = false, length = 20)
+        private String status = "ACTIVE";
+
+        @CreationTimestamp
+        @Column(name = "created_at", nullable = false, updatable = false)
+        private OffsetDateTime createdAt;
+
+        @UpdateTimestamp
+        @Column(name = "updated_at", nullable = false)
+        private OffsetDateTime updatedAt;
+
+        protected Rule() {}
+
+        public Rule(UUID tenantId, String symbol, String ruleType,
+                    Map<String, Object> params, String webhookUrl) {
+            this.tenantId = tenantId;
+            this.symbol = symbol;
+            this.ruleType = ruleType;
+            this.params = params;
+            this.webhookUrl = webhookUrl;
+        }
+
+        public void markDeleted() { this.status = "DELETED"; }
+        public void markEvalPaused() { this.status = "EVAL_PAUSED"; }
+
+        // getter cho mọi trường ...
+    }
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/repository/RuleRepository.java
+  lang: java
+  content: |
+    public interface RuleRepository extends JpaRepository<Rule, UUID> {
+
+        List<Rule> findByTenantIdAndStatusNot(UUID tenantId, String status);
+
+        /** Nạp tất cả rule ACTIVE lúc khởi động — dùng cho in-memory RuleStore (bước 5.4). */
+        List<Rule> findByStatus(String status);
+
+        long countByTenantIdAndStatus(UUID tenantId, String status);
+
+        Optional<Rule> findByIdAndTenantId(UUID id, UUID tenantId);
+    }
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/config/RabbitConfig.java
+  lang: java
+  content: |
+    @Configuration
+    public class RabbitConfig {
+
+        public static final String TRADES_EXCHANGE  = "market-pulse.trades";
+        public static final String CANDLES_EXCHANGE = "market-pulse.candles";
+        public static final String QUOTA_EXCHANGE   = "market-pulse.quota";
+        public static final String ALERTS_EXCHANGE  = "market-pulse.alerts";
+
+        public static final String TRADES_QUEUE  = "rule-engine.trades";
+        public static final String CANDLES_QUEUE = "rule-engine.candles";
+        public static final String QUOTA_QUEUE   = "rule-engine.quota";
+
+        public static final String CANDLES_BINDING_KEY = "*.1m";
+        public static final String QUOTA_BINDING_KEY    = "quota.exceeded";
+        public static final String ALERTS_ROUTING_KEY    = "alert";
+
+        @Bean public FanoutExchange tradesExchange() { return new FanoutExchange(TRADES_EXCHANGE, true, false); }
+        @Bean public TopicExchange candlesExchange() { return new TopicExchange(CANDLES_EXCHANGE, true, false); }
+        @Bean public DirectExchange quotaExchange() { return new DirectExchange(QUOTA_EXCHANGE, true, false); }
+        // Declare exchange alerts để publish; queue do alert-delivery/billing tự khai (Chặng 6/7).
+        @Bean public DirectExchange alertsExchange() { return new DirectExchange(ALERTS_EXCHANGE, true, false); }
+
+        @Bean public Queue tradesQueue() { return new Queue(TRADES_QUEUE, true); }
+        @Bean public Queue candlesQueue() { return new Queue(CANDLES_QUEUE, true); }
+        @Bean public Queue quotaQueue() { return new Queue(QUOTA_QUEUE, true); }
+
+        @Bean
+        public Binding tradesBinding(Queue tradesQueue, FanoutExchange tradesExchange) {
+            return BindingBuilder.bind(tradesQueue).to(tradesExchange);
+        }
+        @Bean
+        public Binding candlesBinding(Queue candlesQueue, TopicExchange candlesExchange) {
+            return BindingBuilder.bind(candlesQueue).to(candlesExchange).with(CANDLES_BINDING_KEY);
+        }
+        @Bean
+        public Binding quotaBinding(Queue quotaQueue, DirectExchange quotaExchange) {
+            return BindingBuilder.bind(quotaQueue).to(quotaExchange).with(QUOTA_BINDING_KEY);
+        }
+
+        @Bean
+        public Jackson2JsonMessageConverter jackson2JsonMessageConverter() {
+            DefaultJackson2JavaTypeMapper typeMapper = new DefaultJackson2JavaTypeMapper();
+            typeMapper.setTrustedPackages("com.marketpulse.*");
+            Jackson2JsonMessageConverter converter = new Jackson2JsonMessageConverter();
+            converter.setClassMapper(typeMapper);
+            return converter;
+        }
+    }
+- type: callout
+  variant: tip
+  content: '**Vì sao khai cả `QUOTA_EXCHANGE`/`ALERTS_EXCHANGE` khi Chặng 6-7 chưa tồn tại?** Đây là lợi ích thật của kiến trúc message-driven: khai trước "hợp đồng giao tiếp" (tên exchange, routing key) không đòi hỏi bên kia phải có mặt. `rule-engine` publish alert vào `market-pulse.alerts` ngay từ Chặng 5; khi `alert-delivery` ra đời ở Chặng 6, nó chỉ cần bind queue vào đúng exchange này — không phải sửa gì ở `rule-engine`.'
+- type: command
+  label: Lưu mốc bước 5.2
+  content: |
+    git add rule-engine
+    git commit -m "[step-5.2] rule-engine: Rule entity (JSONB params) + repository + RabbitMQ topology (trades/candles/quota nghe + alerts phát)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.2)
+  url: https://github.com/KouTaru99/market-pulse/commit/873c692

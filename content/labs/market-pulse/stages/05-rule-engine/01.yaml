@@ -1,0 +1,84 @@
+id: re-01
+title: 'rule-engine: dependency + database riêng + schema rules (JSONB)'
+order: 1
+est_minutes: 25
+commit_ref: bda4033
+goal: 'Cài AMQP+JPA+Validation+WebFlux+Flyway, và tạo bảng rules — dùng cột JSONB để 1 bảng chứa được 3 loại rule khác nhau mà không cần 3 schema riêng.'
+deliverable: build.gradle.kts + application.yml (DB riêng cổng 5434 + billing.service.url) + V1__init.sql.
+outcome_preview: 'rule-engine có database riêng (nguyên tắc db-per-service, lần thứ 3 áp dụng) — sẵn sàng lưu rule của mọi tenant, mọi loại.'
+blocks:
+- type: prose
+  content: |
+    Chặng 5 dựng service phức tạp nhất trong đường ống: `rule-engine` cho khách hàng B2B (tenant) tạo **rule cảnh báo**, rồi tự động khớp rule đó với dòng trade/nến chảy qua liên tục. Có 3 loại rule (ngưỡng giá, % thay đổi, đột biến khối lượng) — mỗi loại cần tham số khác nhau.
+
+    Thay vì 3 bảng riêng (hoặc 1 bảng với hàng chục cột NULL tuỳ loại), dùng **1 cột `params` kiểu JSONB**: linh hoạt như NoSQL, nhưng vẫn nằm trong Postgres, vẫn JOIN/index được như quan hệ thường.
+- type: code
+  filename: rule-engine/build.gradle.kts (thêm)
+  lang: kotlin
+  content: |
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation("org.springframework.boot:spring-boot-starter-amqp")
+        implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+        implementation("org.springframework.boot:spring-boot-starter-validation")
+        implementation("org.springframework.boot:spring-boot-starter-webflux")
+        implementation("org.flywaydb:flyway-core")
+        implementation("org.flywaydb:flyway-database-postgresql")
+        runtimeOnly("org.postgresql:postgresql")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: prose
+  content: '`spring-boot-starter-webflux` xuất hiện dù `rule-engine` không phải app reactive — lý do: nó sẽ gọi HTTP sang `billing` (Chặng 7) để kiểm quota, và `WebClient` (client HTTP hiện đại của Spring, non-blocking) chỉ có trong WebFlux starter. Dùng `WebClient` không có nghĩa cả app phải reactive — gọi `.block()` khi cần kết quả đồng bộ (sẽ thấy ở bước 5.3).'
+- type: code
+  filename: rule-engine/src/main/resources/application.yml (thêm)
+  lang: yaml
+  content: |
+    spring:
+      rabbitmq:
+        host: ${SPRING_RABBITMQ_HOST:localhost}
+      datasource:
+        url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5434/rule_engine}
+        username: ${SPRING_DATASOURCE_USERNAME:rule_engine_user}
+        password: ${SPRING_DATASOURCE_PASSWORD:change_me}
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        open-in-view: false
+      flyway:
+        enabled: true
+
+    billing:
+      service:
+        url: ${BILLING_SERVICE_URL:http://localhost:8085}
+- type: code
+  filename: rule-engine/src/main/resources/db/migration/V1__init.sql
+  lang: sql
+  content: |
+    CREATE TABLE rules (
+      id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id   UUID         NOT NULL,
+      symbol      VARCHAR(20)  NOT NULL,
+      rule_type   VARCHAR(30)  NOT NULL,
+      params      JSONB        NOT NULL,
+      webhook_url VARCHAR(500) NOT NULL,
+      status      VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE',
+      created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX idx_rules_active ON rules(symbol, status) WHERE status = 'ACTIVE';
+    CREATE INDEX idx_rules_tenant ON rules(tenant_id);
+- type: callout
+  variant: info
+  content: '**`idx_rules_active` là partial index (`WHERE status = ''ACTIVE''`) — kỹ thuật đã gặp ở Chặng 2 (`api_keys`), lặp lại đúng chỗ.** Rule engine tra "rule ACTIVE của symbol X" liên tục, ở tốc độ 1 lần/trade. Rule đã `DELETED`/`EVAL_PAUSED` không bao giờ nằm trong truy vấn nóng đó — không đáng tốn dung lượng index. `billing.service.url` trỏ tới service Chặng 7 CHƯA tồn tại — bước 5.3 sẽ xử lý việc gọi vào một service chưa có mà không làm sập rule-engine.'
+- type: command
+  label: Lưu mốc bước 5.1
+  content: |
+    git add rule-engine
+    git commit -m "[step-5.1] rule-engine: deps (amqp+jpa+webflux+flyway) + config + Flyway V1 rules schema (JSONB)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-5.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/bda4033
