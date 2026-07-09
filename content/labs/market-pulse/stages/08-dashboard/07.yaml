@@ -1,0 +1,59 @@
+id: da-07
+title: 'Milestone Chặng 8: đóng gói + full flow tạo rule → alert → DELIVERED trên UI'
+order: 7
+est_minutes: 30
+commit_ref: 7f4e9b1
+goal: 'Đóng gói dashboard thành image tĩnh (Caddy phục vụ) và xác nhận toàn bộ luồng: tạo rule qua UI với webhook thật → alert bắn ra → trạng thái DELIVERED tự hiện, không cần F5.'
+deliverable: 'dashboard/Dockerfile (2 stage: build tĩnh + Caddy) + Caddyfile (fallback SPA) + service dashboard trong compose (profile full).'
+outcome_preview: 'Milestone Chặng 8 đạt, khép Phần D phần ''mặt tiền'': lần đầu tiên nhìn thấy toàn bộ 7 service (từ Chặng 2 tới Chặng 7) hoạt động cùng nhau qua một giao diện, không phải qua log hay curl.'
+blocks:
+- type: prose
+  content: 'Đóng gói kiểu khác hẳn 5 service Java trước đó: dashboard build ra file **tĩnh** (HTML/CSS/JS thuần), nên stage runtime không cần JVM — chỉ cần một web server nhẹ phục vụ file:'
+- type: code
+  filename: dashboard/Dockerfile
+  lang: dockerfile
+  content: |
+    # Stage 1: Build — package-lock.json đã ghim vite@6/plugin-react@4 nên npm ci tái lập đúng bản
+    # bất kể patch version Node trong image (Vite 8 mới nhất đòi Node 20.19+ mà không cần thiết cho lab này).
+    FROM node:22-alpine AS builder
+    WORKDIR /app
+    COPY package.json package-lock.json ./
+    RUN npm ci
+    COPY . .
+    RUN npm run build
+
+    # Stage 2: Runtime — Caddy phục vụ file tĩnh, fallback index.html cho React Router (client-side routing)
+    FROM caddy:2-alpine
+    COPY --from=builder /app/dist /usr/share/caddy
+    COPY Caddyfile /etc/caddy/Caddyfile
+    EXPOSE 5173
+- type: code
+  filename: dashboard/Caddyfile
+  lang: text
+  content: ":5173 {\n\troot * /usr/share/caddy\n\tfile_server\n\ttry_files {path} /index.html\n}\n"
+- type: callout
+  variant: info
+  content: 'Dòng `try_files {path} /index.html` là chi tiết bắt buộc cho MỌI SPA dùng client-side routing (React Router): khi trình duyệt tải thẳng URL `/rules` (gõ tay hoặc F5), server KHÔNG có file thật tên `rules` — nếu không có dòng fallback này, kết quả sẽ là 404 dù ứng dụng React hoàn toàn có khả năng render trang đó. Fallback về `index.html` để React Router tự nhận URL và render đúng.'
+- type: callout
+  variant: tip
+  content: Base image đổi từ dự tính ban đầu (`node:20-alpine`/`nginx:alpine`) sang `node:22-alpine`/`caddy:2-alpine` — không phải vì Caddy tốt hơn nginx về bản chất, mà vì hai image kia đã có sẵn trong cache local (từ Encyclopaedia), né được lỗi mạng `DeadlineExceeded` lúc kéo metadata base image mới. Một quyết định thực dụng do môi trường, không phải sở thích công nghệ.
+- type: command
+  label: Bật dashboard trong compose (profile full)
+  content: |
+    docker compose -f infra/docker-compose.yml --env-file infra/.env --profile full up -d --build dashboard
+    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5173/        # 200
+    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5173/rules   # 200 (fallback SPA, khong phai 404)
+- type: command
+  label: Lưu mốc bước 8.7
+  content: |
+    git add dashboard/Dockerfile dashboard/Caddyfile dashboard/.dockerignore infra/docker-compose.yml
+    git commit -m "[step-8.7] dashboard: Dockerfile 2 stage (build tinh + Caddy serve, fallback index.html) + service dashboard trong compose"
+- type: prose
+  content: 'Khác mọi chặng trước, Chặng 8 không có một `smoke-ch8.sh` — vì giá trị của một dashboard nằm ở TRẢI NGHIỆM NHÌN THẤY, thứ khó viết thành một kịch bản curl. Nghiệm thu thật sự là bằng mắt, qua trình duyệt thật (Chrome MCP): tạo một rule mới qua UI với webhook thật → publish một alert khớp rule đó → quan sát trang Alerts (Chặng 8.5) tự chuyển trạng thái sang `DELIVERED` nhờ polling, không F5, không gọi API tay.'
+- type: callout
+  variant: info
+  content: 'Milestone Chặng 8 đạt: đây là lần đầu tiên toàn bộ hành trình — tạo rule (Ch5) → khớp trade thật (Ch3-4) → bắn alert (Ch5) → giao webhook có thử lại (Ch6) → tính vào hạn mức (Ch7) — hiện ra thành MỘT trải nghiệm liền mạch trên màn hình, thay vì rời rạc qua nhiều lệnh curl riêng lẻ. Chặng 9 tiếp tục Phần D: đặt cả hệ dưới tải thật để xem nó chịu được tới đâu.'
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-8.7)
+  url: https://github.com/KouTaru99/market-pulse/commit/7f4e9b1

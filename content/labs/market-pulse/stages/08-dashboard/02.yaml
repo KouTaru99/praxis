@@ -1,0 +1,269 @@
+id: da-02
+title: 'dashboard: đăng nhập, tự đăng xuất khi hết hạn, layout full-width'
+order: 2
+est_minutes: 35
+commit_ref: a95e83c
+goal: Viết màn đăng nhập bằng API key (xác thực ngay bằng 1 call thật), AuthContext tự đăng xuất khi gặp 401, layout 4 mục dạng app-shell trải rộng.
+deliverable: LoginPage + AuthContext (lắng nghe custom event) + Layout + App.tsx (routing có bảo vệ).
+outcome_preview: Sau bước này, dashboard có luồng đăng nhập/đăng xuất hoàn chỉnh và một khung giao diện chạy 4 trang.
+blocks:
+- type: prose
+  content: '`LoginPage` không chỉ lưu key rồi tin là xong — nó gọi NGAY một API nhẹ (`/api/v1/usage`) để xác thực, và chỉ coi là đăng nhập thành công nếu API trả lời tốt. Cách này tránh tình huống khó chịu: lưu key sai, sang trang sau mới thấy lỗi.'
+- type: code
+  filename: dashboard/src/pages/LoginPage.tsx
+  lang: tsx
+  content: |
+    import { useState, type FormEvent } from 'react';
+    import { Navigate } from 'react-router-dom';
+    import { useAuth } from '../auth/AuthContext';
+    import { api, setStoredApiKey, clearStoredApiKey } from '../api/client';
+    import type { Usage } from '../api/types';
+
+    export default function LoginPage() {
+      const { isAuthenticated, login } = useAuth();
+      const [key, setKey] = useState('');
+      const [error, setError] = useState<string | null>(null);
+      const [checking, setChecking] = useState(false);
+
+      if (isAuthenticated) return <Navigate to="/" replace />;
+
+      async function handleSubmit(e: FormEvent) {
+        e.preventDefault();
+        const trimmed = key.trim();
+        if (!trimmed) return;
+
+        setChecking(true);
+        setError(null);
+        // xác thực ngay bằng 1 call nhẹ — tránh "đăng nhập" xong mới báo sai key ở trang sau
+        setStoredApiKey(trimmed);
+        try {
+          await api.get<Usage>('/api/v1/usage');
+          login(trimmed);
+        } catch {
+          clearStoredApiKey();
+          setError('API key không hợp lệ hoặc đã bị thu hồi.');
+        } finally {
+          setChecking(false);
+        }
+      }
+
+      return (
+        <div className="login-screen">
+          <form className="login-card" onSubmit={handleSubmit}>
+            <h1>Market Pulse</h1>
+            <p className="login-subtitle">Nhập API key để vào dashboard.</p>
+            <input
+              type="text"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder="mp_..."
+              autoFocus
+            />
+            {error && <p className="login-error">{error}</p>}
+            <button type="submit" disabled={checking || !key.trim()}>
+              {checking ? 'Đang kiểm tra...' : 'Đăng nhập'}
+            </button>
+            <p className="login-hint">
+              Demo: <code>demo-key-acme-2026</code> (tenant Acme Corp, gói starter)
+            </p>
+          </form>
+        </div>
+      );
+    }
+- type: prose
+  content: 'Bài toán: `client.ts` (bước 8.1) là module thuần không import React, nhưng khi gặp lỗi 401 (key bị thu hồi giữa chừng phiên làm việc) thì cần một cách để `AuthProvider` biết mà tự đăng xuất. Giải pháp: bắn một **CustomEvent DOM**, ai cần thì tự lắng nghe — không cần import chéo giữa module thuần và tầng React:'
+- type: code
+  filename: dashboard/src/api/client.ts
+  lang: typescript
+  content: |
+    const BASE_URL = import.meta.env.VITE_GATEWAY_URL ?? 'http://localhost:8080';
+    const API_KEY_STORAGE_KEY = 'mp_api_key';
+
+    /** client.ts là module thuần, không import React — báo lỗi auth qua event để AuthProvider tự lắng nghe. */
+    export const AUTH_ERROR_EVENT = 'mp:auth-error';
+
+    export class ApiError extends Error {
+      status: number;
+      constructor(status: number, message: string) {
+        super(message);
+        this.status = status;
+      }
+    }
+
+    export function getStoredApiKey(): string | null {
+      return localStorage.getItem(API_KEY_STORAGE_KEY);
+    }
+
+    export function setStoredApiKey(key: string) {
+      localStorage.setItem(API_KEY_STORAGE_KEY, key);
+    }
+
+    export function clearStoredApiKey() {
+      localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+
+    async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+      const apiKey = getStoredApiKey();
+      const headers = new Headers(options.headers);
+      headers.set('Content-Type', 'application/json');
+      if (apiKey) headers.set('X-API-Key', apiKey);
+
+      const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+
+      if (!res.ok) {
+        let message = res.statusText;
+        try {
+          const body = await res.json();
+          message = body.error ?? message;
+        } catch {
+          // body không phải JSON (vd: lỗi hạ tầng) — giữ statusText
+        }
+        if (res.status === 401) {
+          clearStoredApiKey();
+          window.dispatchEvent(new Event(AUTH_ERROR_EVENT));
+        }
+        throw new ApiError(res.status, message);
+      }
+
+      if (res.status === 204) return undefined as T;
+      return res.json();
+    }
+
+    export const api = {
+      get: <T>(path: string) => request<T>(path),
+      post: <T>(path: string, body?: unknown) =>
+        request<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }),
+      delete: (path: string) => request<void>(path, { method: 'DELETE' }),
+    };
+- type: code
+  filename: dashboard/src/auth/AuthContext.tsx
+  lang: tsx
+  content: |
+    import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+    import { AUTH_ERROR_EVENT, clearStoredApiKey, getStoredApiKey, setStoredApiKey } from '../api/client';
+
+    interface AuthContextValue {
+      isAuthenticated: boolean;
+      login: (key: string) => void;
+      logout: () => void;
+    }
+
+    const AuthContext = createContext<AuthContextValue | null>(null);
+
+    export function AuthProvider({ children }: { children: ReactNode }) {
+      const [isAuthenticated, setIsAuthenticated] = useState(() => getStoredApiKey() !== null);
+
+      useEffect(() => {
+        const handleAuthError = () => setIsAuthenticated(false);
+        window.addEventListener(AUTH_ERROR_EVENT, handleAuthError);
+        return () => window.removeEventListener(AUTH_ERROR_EVENT, handleAuthError);
+      }, []);
+
+      const login = useCallback((key: string) => {
+        setStoredApiKey(key);
+        setIsAuthenticated(true);
+      }, []);
+
+      const logout = useCallback(() => {
+        clearStoredApiKey();
+        setIsAuthenticated(false);
+      }, []);
+
+      return <AuthContext.Provider value={{ isAuthenticated, login, logout }}>{children}</AuthContext.Provider>;
+    }
+
+    export function useAuth() {
+      const ctx = useContext(AuthContext);
+      if (!ctx) throw new Error('useAuth phải dùng trong AuthProvider');
+      return ctx;
+    }
+- type: callout
+  variant: info
+  content: 'Đây là một mẫu tách bạch (decoupling) hữu ích: tầng gọi API không cần biết gì về React/Context, tầng React không cần đưa client.ts thành một hook — chúng gặp nhau qua sự kiện DOM, thứ cả hai phía đều hiểu mà không phụ thuộc trực tiếp vào nhau.'
+- type: prose
+  content: 'Layout 4 mục (Rules/Alerts/API Keys/Usage) và khung điều hướng bảo vệ (`RequireAuth`) trong `App.tsx`:'
+- type: code
+  filename: dashboard/src/components/Layout.tsx
+  lang: tsx
+  content: |
+    import { NavLink, Outlet } from 'react-router-dom';
+    import { useAuth } from '../auth/AuthContext';
+
+    export default function Layout() {
+      const { logout } = useAuth();
+
+      return (
+        <div className="app-shell">
+          <header className="app-header">
+            <span className="app-title">Market Pulse</span>
+            <nav className="app-nav">
+              <NavLink to="/rules">Rules</NavLink>
+              <NavLink to="/alerts">Alerts</NavLink>
+              <NavLink to="/keys">API Keys</NavLink>
+              <NavLink to="/usage">Usage</NavLink>
+            </nav>
+            <button className="logout-btn" onClick={logout}>Đăng xuất</button>
+          </header>
+          <main className="app-content">
+            <Outlet />
+          </main>
+        </div>
+      );
+    }
+- type: code
+  filename: dashboard/src/App.tsx
+  lang: tsx
+  content: |
+    import type { ReactNode } from 'react';
+    import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+    import { AuthProvider, useAuth } from './auth/AuthContext';
+    import Layout from './components/Layout';
+    import LoginPage from './pages/LoginPage';
+    import RulesPage from './pages/RulesPage';
+    import AlertsPage from './pages/AlertsPage';
+    import KeysPage from './pages/KeysPage';
+    import UsagePage from './pages/UsagePage';
+
+    function RequireAuth({ children }: { children: ReactNode }) {
+      const { isAuthenticated } = useAuth();
+      if (!isAuthenticated) return <Navigate to="/login" replace />;
+      return <>{children}</>;
+    }
+
+    export default function App() {
+      return (
+        <AuthProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/login" element={<LoginPage />} />
+              <Route
+                path="/"
+                element={
+                  <RequireAuth>
+                    <Layout />
+                  </RequireAuth>
+                }
+              >
+                <Route index element={<Navigate to="/rules" replace />} />
+                <Route path="rules" element={<RulesPage />} />
+                <Route path="alerts" element={<AlertsPage />} />
+                <Route path="keys" element={<KeysPage />} />
+                <Route path="usage" element={<UsagePage />} />
+              </Route>
+            </Routes>
+          </BrowserRouter>
+        </AuthProvider>
+      );
+    }
+- type: callout
+  variant: warning
+  content: Layout dùng `app-shell` **trải rộng toàn màn hình** (header ngang + nội dung chiếm hết chiều rộng), không bó cột giữa để trống hai bên — đúng nguyên tắc đã học đi học lại xuyên suốt Praxis (chính Platform này cũng từng mắc lỗi này và phải sửa). Một khi nguyên tắc đã thấm, áp dụng ngay từ đầu ở dashboard thay vì phải sửa sau.
+- type: command
+  label: Lưu mốc bước 8.2
+  content: |
+    git add dashboard
+    git commit -m "[step-8.2] dashboard: man dang nhap API key + AuthContext (401 tu dang xuat) + layout/nav 4 muc, full-width app-shell"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-8.2)
+  url: https://github.com/KouTaru99/market-pulse/commit/a95e83c

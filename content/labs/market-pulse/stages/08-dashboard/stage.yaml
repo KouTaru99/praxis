@@ -1,0 +1,5 @@
+id: dashboard
+order: 8
+title: Dashboard — nhìn thấy toàn bộ hệ thống
+description: 'SPA React+Vite gọi thẳng gateway: đăng nhập bằng API key, quản lý Rules/Keys, xem Alerts tự cập nhật, theo dõi Usage. Lần đầu tiên trong Lab có một giao diện để NHÌN THấY luồng dữ liệu thay vì chỉ gọi API bằng tay. Milestone: full flow tạo rule → alert → DELIVERED hiện trên UI không cần thao tác thủ công.'
+part: D · Mặt tiền & vận hành

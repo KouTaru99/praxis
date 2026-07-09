@@ -1,0 +1,87 @@
+id: da-06
+title: 'dashboard: trang Usage — ráp 2 nguồn, không thêm API mới'
+order: 6
+est_minutes: 20
+commit_ref: da13cd4
+goal: 'Viết trang xem lượng dùng: 2 thanh tiến trình (active rules / alerts tháng này), ráp dữ liệu từ 2 API đã có sẵn thay vì thêm một cross-service call mới ở backend.'
+deliverable: UsagePage.tsx (gọi song song 2 API, đếm rule ACTIVE phía frontend).
+outcome_preview: Sau bước này, tenant thấy ngay mình đang dùng bao nhiêu so với hạn mức gói — không cần một endpoint backend mới nào cả.
+blocks:
+- type: prose
+  content: 'billing (Chặng 7) chỉ biết đếm alert, KHÔNG biết số rule đang hoạt động (đó là dữ liệu của rule-engine, đúng db-per-service). Thay vì thêm một cross-service call mới ở backend (billing hỏi rule-engine), trang này tự **ráp ở tầng frontend**: gọi song song `/api/v1/usage` (billing) và `/api/v1/rules` (rule-engine, dữ liệu vốn đã cần tải cho trang Rules), rồi tự đếm số rule `ACTIVE` ngay trong trình duyệt.'
+- type: code
+  filename: dashboard/src/pages/UsagePage.tsx
+  lang: tsx
+  content: |
+    import { useEffect, useState } from 'react';
+    import { api, ApiError } from '../api/client';
+    import type { Rule, Usage } from '../api/types';
+
+    function ProgressStat({ label, current, max }: { label: string; current: number; max: number }) {
+      const pct = max > 0 ? Math.min((current / max) * 100, 100) : 0;
+      const over = current >= max;
+      return (
+        <div className="form-card" style={{ maxWidth: 480 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <strong>{label}</strong>
+            <span>{current} / {max}</span>
+          </div>
+          <div className="progress-bar">
+            <div className={`progress-bar-fill${over ? ' over-limit' : ''}`} style={{ width: `${pct}%` }} />
+          </div>
+          {over && <p style={{ color: 'var(--danger)', margin: 0 }}>Đã đạt giới hạn gói.</p>}
+        </div>
+      );
+    }
+
+    export default function UsagePage() {
+      const [usage, setUsage] = useState<Usage | null>(null);
+      const [activeRules, setActiveRules] = useState<number | null>(null);
+      const [error, setError] = useState<string | null>(null);
+
+      useEffect(() => {
+        async function load() {
+          setError(null);
+          try {
+            const [usageData, rules] = await Promise.all([
+              api.get<Usage>('/api/v1/usage'),
+              api.get<Rule[]>('/api/v1/rules'),
+            ]);
+            setUsage(usageData);
+            setActiveRules(rules.filter((r) => r.status === 'ACTIVE').length);
+          } catch (e) {
+            setError(e instanceof ApiError ? e.message : 'Không tải được usage.');
+          }
+        }
+        load();
+      }, []);
+
+      return (
+        <div>
+          <div className="page-header">
+            <h1>Usage</h1>
+          </div>
+
+          {error && <div className="error-banner">{error}</div>}
+
+          {usage && activeRules !== null && (
+            <>
+              <ProgressStat label="Active rules" current={activeRules} max={usage.maxRules} />
+              <ProgressStat label={`Alerts tháng ${usage.period}`} current={usage.alertsFired} max={usage.maxAlertsPerMonth} />
+            </>
+          )}
+        </div>
+      );
+    }
+- type: callout
+  variant: info
+  content: 'Đây là một đánh đổi kiến trúc nhỏ nhưng đáng nói: "ráp dữ liệu ở tầng hiển thị" thay vì "thêm một lời gọi service-to-service mới". Cách này tránh tăng thêm một phụ thuộc backend (billing→rule-engine) chỉ để phục vụ một con số hiển thị — cái giá là frontend phải tự làm phép tính, chấp nhận được vì dữ liệu vốn công khai qua API tenant đã có quyền gọi.'
+- type: command
+  label: Lưu mốc bước 8.6
+  content: |
+    git add dashboard
+    git commit -m "[step-8.6] dashboard: trang Usage - progress bar active rules + alerts/thang, rap tu 2 nguon"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-8.6)
+  url: https://github.com/KouTaru99/market-pulse/commit/da13cd4

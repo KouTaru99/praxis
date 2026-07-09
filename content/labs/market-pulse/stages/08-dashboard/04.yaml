@@ -1,0 +1,294 @@
+id: da-04
+title: 'dashboard: trang Rules — form đổi theo loại, báo lỗi quota rõ ràng'
+order: 4
+est_minutes: 35
+commit_ref: e1d5d67
+goal: 'Viết trang quản lý rule: form nhập liệu đổi theo 3 loại rule, và khi vượt hạn mức gói thì báo rõ ràng thay vì mã lỗi 402 thô.'
+deliverable: RulesPage.tsx (list/create/delete, form động theo loại) + ApiError mở rộng mang theo body gốc.
+outcome_preview: Sau bước này, tenant tạo rule qua giao diện thân thiện, và lần đầu tiên NHÌN THẤY cơ chế hạn mức của billing (Chặng 7) không phải qua status code mà qua một câu thông báo con người đọc được.
+blocks:
+- type: prose
+  content: 'Ba loại rule (Chặng 5: `PRICE_THRESHOLD`/`PERCENT_CHANGE`/`VOLUME_SPIKE`) cần ba bộ tham số khác nhau — form đổi field hiển thị theo `type` đang chọn thay vì bắt người dùng tự biết cần điền gì:'
+- type: code
+  filename: dashboard/src/pages/RulesPage.tsx
+  lang: tsx
+  content: |
+    import { useEffect, useState, type FormEvent } from 'react';
+    import { api, ApiError } from '../api/client';
+    import type { Rule, RuleType } from '../api/types';
+
+    const RULE_TYPE_LABELS: Record<RuleType, string> = {
+      PRICE_THRESHOLD: 'Ngưỡng giá',
+      PERCENT_CHANGE: '% thay đổi',
+      VOLUME_SPIKE: 'Đột biến khối lượng',
+    };
+
+    function friendlyError(e: unknown): string {
+      if (e instanceof ApiError) {
+        if (e.body?.error === 'QUOTA_EXCEEDED_RULES') {
+          return `Đã đạt giới hạn rule của gói (${e.body.current}/${e.body.limit}) — xoá bớt rule hoặc nâng gói.`;
+        }
+        return e.message;
+      }
+      return 'Có lỗi xảy ra.';
+    }
+
+    export default function RulesPage() {
+      const [rules, setRules] = useState<Rule[]>([]);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState<string | null>(null);
+      const [creating, setCreating] = useState(false);
+
+      const [symbol, setSymbol] = useState('BTCUSDT');
+      const [type, setType] = useState<RuleType>('PRICE_THRESHOLD');
+      const [webhookUrl, setWebhookUrl] = useState('https://example.com/hook');
+      const [threshold, setThreshold] = useState('50000');
+      const [direction, setDirection] = useState('BELOW');
+      const [percent, setPercent] = useState('5');
+      const [windowMinutes, setWindowMinutes] = useState('5');
+      const [multiplier, setMultiplier] = useState('3');
+
+      async function load() {
+        setLoading(true);
+        setError(null);
+        try {
+          setRules(await api.get<Rule[]>('/api/v1/rules'));
+        } catch (e) {
+          setError(friendlyError(e));
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      useEffect(() => {
+        load();
+      }, []);
+
+      function buildParams(): Record<string, string> {
+        switch (type) {
+          case 'PRICE_THRESHOLD':
+            return { threshold, direction };
+          case 'PERCENT_CHANGE':
+            return { percent, windowMinutes, direction: direction === 'BELOW' ? 'DOWN' : 'UP' };
+          case 'VOLUME_SPIKE':
+            return { multiplier };
+        }
+      }
+
+      async function handleCreate(e: FormEvent) {
+        e.preventDefault();
+        setCreating(true);
+        setError(null);
+        try {
+          await api.post('/api/v1/rules', { symbol, type, params: buildParams(), webhookUrl });
+          await load();
+        } catch (e) {
+          setError(friendlyError(e));
+        } finally {
+          setCreating(false);
+        }
+      }
+
+      async function handleDelete(id: string) {
+        try {
+          await api.delete(`/api/v1/rules/${id}`);
+          await load();
+        } catch (e) {
+          setError(friendlyError(e));
+        }
+      }
+
+      return (
+        <div>
+          <div className="page-header">
+            <h1>Rules</h1>
+          </div>
+
+          {error && <div className="error-banner">{error}</div>}
+
+          <form className="form-card" onSubmit={handleCreate}>
+            <h3>Tạo rule mới</h3>
+            <div className="form-row">
+              <label htmlFor="symbol">Symbol</label>
+              <input id="symbol" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} required />
+            </div>
+            <div className="form-row">
+              <label htmlFor="type">Loại rule</label>
+              <select id="type" value={type} onChange={(e) => setType(e.target.value as RuleType)}>
+                {Object.entries(RULE_TYPE_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </div>
+
+            {type === 'PRICE_THRESHOLD' && (
+              <>
+                <div className="form-row">
+                  <label htmlFor="threshold">Ngưỡng giá</label>
+                  <input id="threshold" type="number" value={threshold} onChange={(e) => setThreshold(e.target.value)} required />
+                </div>
+                <div className="form-row">
+                  <label htmlFor="direction">Hướng</label>
+                  <select id="direction" value={direction} onChange={(e) => setDirection(e.target.value)}>
+                    <option value="BELOW">Xuống dưới (BELOW)</option>
+                    <option value="ABOVE">Vượt lên (ABOVE)</option>
+                  </select>
+                </div>
+              </>
+            )}
+
+            {type === 'PERCENT_CHANGE' && (
+              <>
+                <div className="form-row">
+                  <label htmlFor="percent">% thay đổi tối thiểu</label>
+                  <input id="percent" type="number" value={percent} onChange={(e) => setPercent(e.target.value)} required />
+                </div>
+                <div className="form-row">
+                  <label htmlFor="windowMinutes">Trong vòng (phút)</label>
+                  <input id="windowMinutes" type="number" value={windowMinutes} onChange={(e) => setWindowMinutes(e.target.value)} required />
+                </div>
+                <div className="form-row">
+                  <label htmlFor="direction">Hướng</label>
+                  <select id="direction" value={direction} onChange={(e) => setDirection(e.target.value)}>
+                    <option value="BELOW">Giảm (DOWN)</option>
+                    <option value="ABOVE">Tăng (UP)</option>
+                  </select>
+                </div>
+              </>
+            )}
+
+            {type === 'VOLUME_SPIKE' && (
+              <div className="form-row">
+                <label htmlFor="multiplier">Hệ số so với trung bình 60 phút</label>
+                <input id="multiplier" type="number" value={multiplier} onChange={(e) => setMultiplier(e.target.value)} required />
+              </div>
+            )}
+
+            <div className="form-row">
+              <label htmlFor="webhookUrl">Webhook URL</label>
+              <input id="webhookUrl" type="url" value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} required />
+            </div>
+
+            <button type="submit" className="primary" disabled={creating}>
+              {creating ? 'Đang tạo...' : 'Tạo rule'}
+            </button>
+          </form>
+
+          {loading ? (
+            <p>Đang tải...</p>
+          ) : rules.length === 0 ? (
+            <div className="empty-state">Chưa có rule nào.</div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Loại</th>
+                  <th>Params</th>
+                  <th>Trạng thái</th>
+                  <th>Tạo lúc</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rules.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.symbol}</td>
+                    <td>{RULE_TYPE_LABELS[r.type]}</td>
+                    <td><code>{JSON.stringify(r.params)}</code></td>
+                    <td>
+                      <span className={`badge status-${r.status.toLowerCase()}`}>{r.status}</span>
+                    </td>
+                    <td>{new Date(r.createdAt).toLocaleString('vi-VN')}</td>
+                    <td>
+                      <button type="button" className="danger" onClick={() => handleDelete(r.id)}>Xoá</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      );
+    }
+- type: prose
+  content: 'Để đọc được field `current`/`limit` trong body lỗi 402 `QUOTA_EXCEEDED_RULES` (billing Chặng 7 trả về), `ApiError` cần mang theo body gốc, không chỉ message:'
+- type: code
+  filename: dashboard/src/api/client.ts
+  lang: typescript
+  content: |
+    const BASE_URL = import.meta.env.VITE_GATEWAY_URL ?? 'http://localhost:8080';
+    const API_KEY_STORAGE_KEY = 'mp_api_key';
+
+    /** client.ts là module thuần, không import React — báo lỗi auth qua event để AuthProvider tự lắng nghe. */
+    export const AUTH_ERROR_EVENT = 'mp:auth-error';
+
+    export class ApiError extends Error {
+      status: number;
+      /** body lỗi gốc (vd: {error, limit, current} của QUOTA_EXCEEDED_RULES) — caller tự đọc thêm field cần. */
+      body: Record<string, unknown> | null;
+      constructor(status: number, message: string, body: Record<string, unknown> | null = null) {
+        super(message);
+        this.status = status;
+        this.body = body;
+      }
+    }
+
+    export function getStoredApiKey(): string | null {
+      return localStorage.getItem(API_KEY_STORAGE_KEY);
+    }
+
+    export function setStoredApiKey(key: string) {
+      localStorage.setItem(API_KEY_STORAGE_KEY, key);
+    }
+
+    export function clearStoredApiKey() {
+      localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+
+    async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+      const apiKey = getStoredApiKey();
+      const headers = new Headers(options.headers);
+      headers.set('Content-Type', 'application/json');
+      if (apiKey) headers.set('X-API-Key', apiKey);
+
+      const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+
+      if (!res.ok) {
+        let message = res.statusText;
+        let body: Record<string, unknown> | null = null;
+        try {
+          body = await res.json();
+          message = (body?.error as string) ?? message;
+        } catch {
+          // body không phải JSON (vd: lỗi hạ tầng) — giữ statusText
+        }
+        if (res.status === 401) {
+          clearStoredApiKey();
+          window.dispatchEvent(new Event(AUTH_ERROR_EVENT));
+        }
+        throw new ApiError(res.status, message, body);
+      }
+
+      if (res.status === 204) return undefined as T;
+      return res.json();
+    }
+
+    export const api = {
+      get: <T>(path: string) => request<T>(path),
+      post: <T>(path: string, body?: unknown) =>
+        request<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }),
+      delete: (path: string) => request<void>(path, { method: 'DELETE' }),
+    };
+- type: callout
+  variant: info
+  content: '`friendlyError()` là điểm chạm đầu tiên nơi con người THẤY được cơ chế hạn mức đã xây từ Chặng 7 — trước đó billing chỉ được kiểm bằng script (`smoke-ch7.sh` đọc JSON). Một API thiết kế tốt (trả `{error, current, limit}` thay vì chỉ mã lỗi) là điều kiện để tầng giao diện phía trên biến nó thành một câu người dùng hiểu ngay, không cần tra bảng mã lỗi.'
+- type: command
+  label: Lưu mốc bước 8.4
+  content: |
+    git add dashboard
+    git commit -m "[step-8.4] dashboard: trang Rules - list/create/delete, form theo loai rule, bao 402 QUOTA_EXCEEDED_RULES"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-8.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/e1d5d67

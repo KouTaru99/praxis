@@ -1,0 +1,251 @@
+id: da-01
+title: 'dashboard: scaffold React+Vite + API client + CORS'
+order: 1
+est_minutes: 30
+commit_ref: f05f7ab
+goal: Khởi tạo dashboard React, viết API client thuần (không phụ thuộc framework) + type khớp DTO backend, mở CORS ở gateway.
+deliverable: Scaffold Vite+React+TS + api/client.ts (fetch wrapper, X-API-Key) + api/types.ts + gateway CORS.
+outcome_preview: Sau bước này, dashboard có bộ khung gọi API và gateway đã cho phép trình duyệt gọi tới — nền cho 6 bước tiếp theo.
+blocks:
+- type: prose
+  content: Chặng 8 mở **Phần D**, phần cuối cùng của Lab. Bảy service phía sau (Chặng 2-7) tới giờ chỉ được gọi qua `curl` hoặc script smoke test. **dashboard** là lần đầu tiên có một giao diện thật, để tận mắt NHÌN THẤY luồng dữ liệu chảy qua hệ thống, thay vì đọc log hay JSON thô.
+- type: diagram
+  content: |
+    flowchart LR
+      DB[dashboard - trinh duyet] -->|X-API-Key| GW[gateway :8080]
+      GW --> ID[identity]
+      GW --> RE[rule-engine]
+      GW --> AD[alert-delivery]
+      GW --> BI[billing]
+- type: prose
+  content: Dashboard là một SPA (Single Page Application) độc lập, gọi thẳng **gateway** — không qua service nào khác, đúng vai trò cổng vào duy nhất mà gateway đã giữ từ Chặng 2. `package.json` ghim `vite@6`/`@vitejs/plugin-react@4` thay vì bản Vite 8 mới nhất, vì Vite 8 đòi Node ≥20.19 trong khi máy đang chạy 20.15 — cùng kiểu quyết định "ghim version khớp môi trường thật" đã gặp trước đây (Node 22 LTS ở mini-wiki, hay chọn base image theo thứ đã cache sẵn).
+- type: code
+  filename: dashboard/package.json
+  lang: json
+  content: |
+    {
+      "name": "dashboard",
+      "private": true,
+      "version": "0.0.0",
+      "type": "module",
+      "scripts": {
+        "dev": "vite",
+        "build": "tsc -b && vite build",
+        "lint": "oxlint",
+        "preview": "vite preview"
+      },
+      "dependencies": {
+        "react": "^19.2.7",
+        "react-dom": "^19.2.7",
+        "react-router-dom": "^7.18.1"
+      },
+      "devDependencies": {
+        "@types/node": "^24.13.2",
+        "@types/react": "^19.2.17",
+        "@types/react-dom": "^19.2.3",
+        "@vitejs/plugin-react": "^4.7.0",
+        "oxlint": "^1.71.0",
+        "typescript": "~6.0.2",
+        "vite": "^6.4.3"
+      }
+    }
+- type: prose
+  content: '`api/client.ts` là một module TypeScript thuần — không import React — bọc `fetch` với API key lấy từ `localStorage`, và tự ném `ApiError` có kèm mã HTTP khi request thất bại:'
+- type: code
+  filename: dashboard/src/api/client.ts
+  lang: typescript
+  content: |
+    const BASE_URL = import.meta.env.VITE_GATEWAY_URL ?? 'http://localhost:8080';
+    const API_KEY_STORAGE_KEY = 'mp_api_key';
+
+    export class ApiError extends Error {
+      status: number;
+      constructor(status: number, message: string) {
+        super(message);
+        this.status = status;
+      }
+    }
+
+    export function getStoredApiKey(): string | null {
+      return localStorage.getItem(API_KEY_STORAGE_KEY);
+    }
+
+    export function setStoredApiKey(key: string) {
+      localStorage.setItem(API_KEY_STORAGE_KEY, key);
+    }
+
+    export function clearStoredApiKey() {
+      localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+
+    async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+      const apiKey = getStoredApiKey();
+      const headers = new Headers(options.headers);
+      headers.set('Content-Type', 'application/json');
+      if (apiKey) headers.set('X-API-Key', apiKey);
+
+      const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+
+      if (!res.ok) {
+        let message = res.statusText;
+        try {
+          const body = await res.json();
+          message = body.error ?? message;
+        } catch {
+          // body không phải JSON (vd: lỗi hạ tầng) — giữ statusText
+        }
+        throw new ApiError(res.status, message);
+      }
+
+      if (res.status === 204) return undefined as T;
+      return res.json();
+    }
+
+    export const api = {
+      get: <T>(path: string) => request<T>(path),
+      post: <T>(path: string, body?: unknown) =>
+        request<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }),
+      delete: (path: string) => request<void>(path, { method: 'DELETE' }),
+    };
+- type: prose
+  content: '`api/types.ts` khai lại các DTO backend phía TypeScript — same nguyên tắc đã lặp lại xuyên suốt Lab: tên field phải khớp CHÍNH XÁC với JSON backend trả về, vì không có module dùng chung giữa Java và TypeScript:'
+- type: code
+  filename: dashboard/src/api/types.ts
+  lang: typescript
+  content: |
+    // Field name khớp CHÍNH XÁC DTO backend (record component name → JSON key qua Jackson).
+
+    export interface ApiKeySummary {
+      id: string;
+      label: string | null;
+      createdAt: string;
+      lastUsedAt: string | null;
+      revoked: boolean;
+    }
+
+    export interface CreateKeyResponse {
+      id: string;
+      key: string;
+      label: string | null;
+      createdAt: string;
+    }
+
+    export type RuleType = 'PRICE_THRESHOLD' | 'PERCENT_CHANGE' | 'VOLUME_SPIKE';
+
+    export interface Rule {
+      id: string;
+      tenantId: string;
+      symbol: string;
+      type: RuleType;
+      params: Record<string, string>;
+      webhookUrl: string;
+      status: string;
+      createdAt: string;
+    }
+
+    export interface AlertAttempt {
+      attemptNumber: number;
+      attemptedAt: string;
+      httpStatus: number | null;
+      outcome: string;
+    }
+
+    export interface AlertSummary {
+      id: string;
+      ruleId: string;
+      symbol: string;
+      ruleType: string;
+      triggeredAt: string;
+      triggerValue: string;
+      status: string;
+      createdAt: string;
+    }
+
+    export interface AlertDetail extends AlertSummary {
+      attempts: AlertAttempt[];
+    }
+
+    export interface PageResponse<T> {
+      content: T[];
+      totalElements: number;
+      totalPages: number;
+      number: number;
+      size: number;
+    }
+
+    export interface Usage {
+      period: string;
+      alertsFired: number;
+      maxAlertsPerMonth: number;
+      maxRules: number;
+    }
+- type: prose
+  content: 'Vì dashboard chạy ở `:5173` còn gateway ở `:8080` — khác **origin** theo định nghĩa của trình duyệt — gateway phải khai CORS mới cho phép JavaScript trong trình duyệt gọi sang:'
+- type: code
+  filename: gateway/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8080
+
+    spring:
+      application:
+        name: gateway
+      cloud:
+        gateway:
+          # dashboard (browser, origin :5173) gọi gateway (:8080) — khác origin nên cần CORS.
+          # Dev server và bản Docker tĩnh đều phục vụ ở cùng port 5173 (xem README bảng port).
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOrigins:
+                  - ${DASHBOARD_ORIGIN:http://localhost:5173}
+                allowedMethods:
+                  - GET
+                  - POST
+                  - DELETE
+                  - OPTIONS
+                allowedHeaders:
+                  - "*"
+          routes:
+            - id: identity-keys
+              uri: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/keys/**
+            - id: rule-engine-rules
+              uri: ${RULE_ENGINE_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/v1/rules/**
+            - id: alert-delivery-alerts
+              uri: ${ALERT_DELIVERY_SERVICE_URL:http://localhost:8084}
+              predicates:
+                - Path=/api/v1/alerts/**
+            - id: billing-usage
+              uri: ${BILLING_SERVICE_URL:http://localhost:8085}
+              predicates:
+                - Path=/api/v1/usage/**
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+
+    identity:
+      service:
+        url: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+- type: callout
+  variant: info
+  content: Đây là lần ĐẦU TIÊN trong toàn bộ Lab mà CORS thật sự cần thiết. Mọi lệnh `curl`/script smoke test trước giờ không bị trình duyệt áp chính sách same-origin, nên chưa ai chạm phải giới hạn này — nó chỉ lộ ra đúng lúc có một trang web thật gọi sang một origin khác.
+- type: command
+  label: Lưu mốc bước 8.1
+  content: |
+    git add dashboard gateway/src/main/resources/application.yml
+    git commit -m "[step-8.1] dashboard: scaffold Vite+React+TS + API client (X-API-Key) + types khop DTO backend + gateway CORS"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-8.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/f05f7ab

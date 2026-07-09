@@ -1,0 +1,171 @@
+id: da-05
+title: 'dashboard: trang Alerts — tự cập nhật, không cần bấm gì'
+order: 5
+est_minutes: 30
+commit_ref: 650d6f3
+goal: 'Viết trang xem alert: phân trang thật, tự làm mới mỗi 4 giây để thấy alert mới bắn ra mà không cần thao tác thủ công, click dòng để xem lịch sử gửi webhook.'
+deliverable: AlertsPage.tsx (phân trang, polling 4s im lặng, mở rộng chi tiết attempt).
+outcome_preview: Sau bước này, một alert được bắn ra từ đâu đó trong hệ thống sẽ TỰ HIỆN trên màn hình, không cần bấm F5 hay gọi API tay — đây là khoảnh khắc "nhìn thấy hệ thống sống" của cả Lab.
+blocks:
+- type: prose
+  content: 'Đây là trang trả lời cho đúng nỗi đau ban đầu của Market Pulse: cảnh báo phải "tới" người xem, không phải người xem đi tìm cảnh báo. Cơ chế: một `setInterval` gọi lại API mỗi 4 giây, với tham số `silent=true` để lần gọi nền không làm nhấp nháy banner lỗi hay trạng thái loading — người dùng chỉ thấy bảng dữ liệu êm ái cập nhật.'
+- type: code
+  filename: dashboard/src/pages/AlertsPage.tsx
+  lang: tsx
+  content: |
+    import { Fragment, useEffect, useState } from 'react';
+    import { api, ApiError } from '../api/client';
+    import type { AlertDetail, AlertSummary, PageResponse } from '../api/types';
+
+    const POLL_INTERVAL_MS = 4000;
+
+    export default function AlertsPage() {
+      const [page, setPage] = useState<PageResponse<AlertSummary> | null>(null);
+      const [pageNumber, setPageNumber] = useState(0);
+      const [error, setError] = useState<string | null>(null);
+      const [expandedId, setExpandedId] = useState<string | null>(null);
+      const [detail, setDetail] = useState<AlertDetail | null>(null);
+      const [detailLoading, setDetailLoading] = useState(false);
+
+      async function load(pageNum: number, silent = false) {
+        if (!silent) setError(null);
+        try {
+          const data = await api.get<PageResponse<AlertSummary>>(`/api/v1/alerts?page=${pageNum}&size=20`);
+          setPage(data);
+        } catch (e) {
+          if (!silent) setError(e instanceof ApiError ? e.message : 'Không tải được alert.');
+        }
+      }
+
+      useEffect(() => {
+        load(pageNumber);
+      }, [pageNumber]);
+
+      // polling nhẹ — "thấy alert trigger, không cần gọi API thủ công" (R07 acceptance)
+      useEffect(() => {
+        const id = setInterval(() => load(pageNumber, true), POLL_INTERVAL_MS);
+        return () => clearInterval(id);
+      }, [pageNumber]);
+
+      async function toggleExpand(id: string) {
+        if (expandedId === id) {
+          setExpandedId(null);
+          setDetail(null);
+          return;
+        }
+        setExpandedId(id);
+        setDetail(null);
+        setDetailLoading(true);
+        try {
+          setDetail(await api.get<AlertDetail>(`/api/v1/alerts/${id}`));
+        } catch (e) {
+          setError(e instanceof ApiError ? e.message : 'Không tải được chi tiết alert.');
+        } finally {
+          setDetailLoading(false);
+        }
+      }
+
+      return (
+        <div>
+          <div className="page-header">
+            <h1>Alerts</h1>
+          </div>
+
+          {error && <div className="error-banner">{error}</div>}
+
+          {!page ? (
+            <p>Đang tải...</p>
+          ) : page.content.length === 0 ? (
+            <div className="empty-state">Chưa có alert nào.</div>
+          ) : (
+            <>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Loại rule</th>
+                    <th>Giá trị</th>
+                    <th>Trạng thái</th>
+                    <th>Trigger lúc</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {page.content.map((a) => (
+                    <Fragment key={a.id}>
+                      <tr onClick={() => toggleExpand(a.id)} style={{ cursor: 'pointer' }}>
+                        <td>{a.symbol}</td>
+                        <td>{a.ruleType}</td>
+                        <td>{a.triggerValue}</td>
+                        <td><span className={`badge status-${a.status.toLowerCase()}`}>{a.status}</span></td>
+                        <td>{new Date(a.triggeredAt).toLocaleString('vi-VN')}</td>
+                        <td>{expandedId === a.id ? '▲' : '▼'}</td>
+                      </tr>
+                      {expandedId === a.id && (
+                        <tr>
+                          <td colSpan={6} style={{ background: 'var(--bg-subtle)' }}>
+                            {detailLoading ? (
+                              <p>Đang tải chi tiết...</p>
+                            ) : detail ? (
+                              <table>
+                                <thead>
+                                  <tr>
+                                    <th>Lần</th>
+                                    <th>Thời điểm</th>
+                                    <th>HTTP status</th>
+                                    <th>Kết quả</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {detail.attempts.map((att) => (
+                                    <tr key={att.attemptNumber}>
+                                      <td>{att.attemptNumber}</td>
+                                      <td>{new Date(att.attemptedAt).toLocaleString('vi-VN')}</td>
+                                      <td>{att.httpStatus ?? '—'}</td>
+                                      <td><span className={`badge status-${att.outcome.toLowerCase()}`}>{att.outcome}</span></td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            ) : null}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+
+              <div style={{ display: 'flex', gap: 12, marginTop: 16, alignItems: 'center' }}>
+                <button type="button" disabled={page.number === 0} onClick={() => setPageNumber((p) => p - 1)}>
+                  ← Trước
+                </button>
+                <span>Trang {page.number + 1}/{Math.max(page.totalPages, 1)} ({page.totalElements} alert)</span>
+                <button
+                  type="button"
+                  disabled={page.number + 1 >= page.totalPages}
+                  onClick={() => setPageNumber((p) => p + 1)}
+                >
+                  Sau →
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+- type: callout
+  variant: tip
+  content: 'Cách verify điều này LÀ THẬT (không phải hàng giả): publish một alert thẳng vào RabbitMQ từ terminal, hoàn toàn KHÔNG chạm vào trình duyệt, rồi quan sát dòng mới tự xuất hiện trên bảng trong vòng 4 giây. Đây là bài kiểm tra trung thực nhất cho một tính năng "tự động cập nhật" — nếu phải bấm gì đó để thấy kết quả thì nó chưa thật sự tự động.'
+- type: callout
+  variant: warning
+  content: 'Polling 4 giây là một lựa chọn đơn giản có chủ đích, không phải tối ưu nhất: một hệ thật với nhiều tenant xem cùng lúc sẽ cân nhắc WebSocket hoặc Server-Sent Events để tránh mỗi trình duyệt tự bắn request đều đặn. Ở quy mô demo/lab, polling đơn giản hơn nhiều để hiểu và đủ dùng.'
+- type: command
+  label: Lưu mốc bước 8.5
+  content: |
+    git add dashboard
+    git commit -m "[step-8.5] dashboard: trang Alerts - phan trang that, polling 4s, click dong mo chi tiet attempt"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-8.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/650d6f3

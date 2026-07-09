@@ -1,0 +1,158 @@
+id: da-03
+title: 'dashboard: trang API Keys — khoá thô chỉ hiện một lần'
+order: 3
+est_minutes: 25
+commit_ref: 249f569
+goal: 'Viết trang quản lý API key: liệt kê, tạo, thu hồi thật qua gateway; khoá thô (raw key) chỉ hiển thị đúng một lần sau khi tạo.'
+deliverable: KeysPage.tsx (list/create/revoke + banner hiện raw key một lần).
+outcome_preview: 'Sau bước này, tenant có thể tự quản lý API key của mình qua giao diện, và hệ vẫn giữ đúng cam kết bảo mật: key thô không bao giờ xem lại được lần hai.'
+blocks:
+- type: prose
+  content: 'Trang này là nơi giao diện **tôn trọng đúng cam kết bảo mật** đã thiết kế từ tận identity Chặng 2: server chỉ trả `key` thô đúng một lần lúc tạo (`ApiKeyService.issue()`), không có endpoint nào đọc lại được. Phía dashboard giữ đúng tinh thần đó: `justCreated` chỉ tồn tại trong state của component, KHÔNG lưu vào `localStorage` hay bất cứ đâu bền vững — rời trang hoặc reload là mất, không có cách lấy lại ngoài thu hồi và tạo key mới.'
+- type: code
+  filename: dashboard/src/pages/KeysPage.tsx
+  lang: tsx
+  content: |
+    import { useEffect, useState, type FormEvent } from 'react';
+    import { api, ApiError } from '../api/client';
+    import type { ApiKeySummary, CreateKeyResponse } from '../api/types';
+
+    export default function KeysPage() {
+      const [keys, setKeys] = useState<ApiKeySummary[]>([]);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState<string | null>(null);
+      const [label, setLabel] = useState('');
+      const [creating, setCreating] = useState(false);
+      // key thô chỉ giữ trong state (không lưu đâu khác) — mất khi rời trang hoặc reload, đúng ý "chỉ hiện 1 lần"
+      const [justCreated, setJustCreated] = useState<CreateKeyResponse | null>(null);
+
+      async function load() {
+        setLoading(true);
+        setError(null);
+        try {
+          const data = await api.get<ApiKeySummary[]>('/api/v1/keys');
+          setKeys(data);
+        } catch (e) {
+          setError(e instanceof ApiError ? e.message : 'Không tải được danh sách key.');
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      useEffect(() => {
+        load();
+      }, []);
+
+      async function handleCreate(e: FormEvent) {
+        e.preventDefault();
+        setCreating(true);
+        setError(null);
+        try {
+          const created = await api.post<CreateKeyResponse>('/api/v1/keys', {
+            label: label.trim() || null,
+          });
+          setJustCreated(created);
+          setLabel('');
+          await load();
+        } catch (e) {
+          setError(e instanceof ApiError ? e.message : 'Tạo key thất bại.');
+        } finally {
+          setCreating(false);
+        }
+      }
+
+      async function handleRevoke(id: string) {
+        try {
+          await api.delete(`/api/v1/keys/${id}`);
+          await load();
+        } catch (e) {
+          setError(e instanceof ApiError ? e.message : 'Thu hồi key thất bại.');
+        }
+      }
+
+      return (
+        <div>
+          <div className="page-header">
+            <h1>API Keys</h1>
+          </div>
+
+          {error && <div className="error-banner">{error}</div>}
+
+          {justCreated && (
+            <div className="form-card" style={{ borderColor: 'var(--accent)' }}>
+              <strong>Key vừa tạo — lưu lại ngay, sẽ không hiển thị lại:</strong>
+              <code style={{ userSelect: 'all', wordBreak: 'break-all' }}>{justCreated.key}</code>
+              <button type="button" onClick={() => setJustCreated(null)}>Đã lưu, đóng</button>
+            </div>
+          )}
+
+          <form className="form-card" onSubmit={handleCreate}>
+            <h3>Tạo key mới</h3>
+            <div className="form-row">
+              <label htmlFor="label">Label (tuỳ chọn)</label>
+              <input
+                id="label"
+                type="text"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="vd: server production"
+              />
+            </div>
+            <button type="submit" className="primary" disabled={creating}>
+              {creating ? 'Đang tạo...' : 'Tạo key'}
+            </button>
+          </form>
+
+          {loading ? (
+            <p>Đang tải...</p>
+          ) : keys.length === 0 ? (
+            <div className="empty-state">Chưa có API key nào.</div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Label</th>
+                  <th>Trạng thái</th>
+                  <th>Tạo lúc</th>
+                  <th>Dùng lần cuối</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {keys.map((k) => (
+                  <tr key={k.id}>
+                    <td>{k.label ?? <em>(không tên)</em>}</td>
+                    <td>
+                      <span className={`badge status-${k.revoked ? 'failed' : 'active'}`}>
+                        {k.revoked ? 'Đã thu hồi' : 'Hoạt động'}
+                      </span>
+                    </td>
+                    <td>{new Date(k.createdAt).toLocaleString('vi-VN')}</td>
+                    <td>{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString('vi-VN') : '—'}</td>
+                    <td>
+                      {!k.revoked && (
+                        <button type="button" className="danger" onClick={() => handleRevoke(k.id)}>
+                          Thu hồi
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      );
+    }
+- type: callout
+  variant: tip
+  content: 'Đây là một ví dụ đẹp về ràng buộc bảo mật LAN TỪ BACKEND RA TỚI TẬN GIAO DIỆN: server không giữ lại key thô sau khi tạo, và frontend cũng cố tình không tạo thêm một nơi lưu trữ nào để "tiện" xem lại — cả hai tầng cùng nhau giữ vững một bất biến (invariant), thay vì backend an toàn nhưng frontend vô tình làm lộ.'
+- type: command
+  label: Lưu mốc bước 8.3
+  content: |
+    git add dashboard
+    git commit -m "[step-8.3] dashboard: trang API Keys - list/create/revoke that qua gateway, raw key hien 1 lan"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-8.3)
+  url: https://github.com/KouTaru99/market-pulse/commit/249f569
