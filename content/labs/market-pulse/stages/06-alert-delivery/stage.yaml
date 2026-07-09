@@ -1,0 +1,5 @@
+id: alert-delivery
+order: 6
+title: Giao cảnh báo tới tenant
+description: 'Service alert-delivery nhận AlertTriggeredEvent từ rule-engine, gửi webhook thật tới URL của tenant, tự động thử lại khi lỗi, và lưu lại lịch sử từng lần gửi. Milestone: profile delivery chạy được.'
+part: C · Giao nhận & tính phí

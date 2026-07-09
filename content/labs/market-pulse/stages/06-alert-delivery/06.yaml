@@ -1,0 +1,103 @@
+id: ad-06
+title: 'alert-delivery: Dockerfile + đăng ký route gateway'
+order: 6
+est_minutes: 20
+commit_ref: a099d71
+goal: Đóng gói alert-delivery thành image Docker, và mở route gateway để /api/v1/alerts đi tới đúng service.
+deliverable: alert-delivery/Dockerfile (multi-stage) + gateway route mới + healthcheck compose dùng wget.
+outcome_preview: Sau bước này, alert-delivery sẵn sàng chạy trong container, và gateway đã biết chuyển tiếp request alerts.
+blocks:
+- type: prose
+  content: 'Dockerfile giữ đúng khuôn multi-stage đã lặp lại từ identity (Chặng 2): stage build JDK đầy đủ, stage runtime JRE alpine gọn nhẹ, cache mount Gradle, user non-root.'
+- type: code
+  filename: alert-delivery/Dockerfile
+  lang: dockerfile
+  content: |
+    # Stage 1: Build
+    FROM eclipse-temurin:21-jdk AS builder
+    WORKDIR /workspace
+
+    # Gradle wrapper
+    COPY gradlew ./
+    COPY gradle gradle/
+
+    # Root build config
+    COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+
+    # Build files của mọi subproject (cần để Gradle evaluate settings.gradle.kts)
+    COPY common/build.gradle.kts       common/build.gradle.kts
+    COPY gateway/build.gradle.kts      gateway/build.gradle.kts
+    COPY identity/build.gradle.kts     identity/build.gradle.kts
+    COPY market-feed/build.gradle.kts  market-feed/build.gradle.kts
+    COPY aggregation/build.gradle.kts  aggregation/build.gradle.kts
+    COPY rule-engine/build.gradle.kts  rule-engine/build.gradle.kts
+    COPY alert-delivery/build.gradle.kts alert-delivery/build.gradle.kts
+    COPY billing/build.gradle.kts      billing/build.gradle.kts
+
+    # Source code: chỉ common (dependency của alert-delivery) và alert-delivery
+    COPY common/src         common/src
+    COPY alert-delivery/src alert-delivery/src
+
+    RUN --mount=type=cache,target=/root/.gradle chmod +x gradlew && ./gradlew :alert-delivery:bootJar --no-daemon -x test
+
+    # Stage 2: Runtime
+    FROM eclipse-temurin:21-jre-alpine
+    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+    WORKDIR /app
+    COPY --from=builder /workspace/alert-delivery/build/libs/alert-delivery.jar app.jar
+    USER appuser
+    EXPOSE 8084
+    ENTRYPOINT ["java", "-Xmx256m", "-jar", "app.jar"]
+- type: callout
+  variant: warning
+  content: 'Bẫy `curl` không có trong `jre-alpine` (gặp lần đầu ở gateway Chặng 2, rồi lặp lại ở aggregation và rule-engine) xuất hiện NGAY TỪ ĐẦU ở service này — vì Dockerfile được copy từ service trước rồi sửa tên module. Sao chép một Dockerfile mẫu thì sao chép luôn cả lỗi có sẵn trong đó; lần này healthcheck được viết đúng `wget` ngay từ commit đầu, không phải sửa sau. Bài học: khi một bẫy đã gặp 3 lần, hãy sửa NGAY VÀO file mẫu để nhân bản không kéo theo lỗi cũ.'
+- type: prose
+  content: 'Gateway mở thêm 1 route, thay cho dòng `TODO Chặng 6` để lại từ Chặng 5:'
+- type: code
+  filename: gateway/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8080
+
+    spring:
+      application:
+        name: gateway
+      cloud:
+        gateway:
+          routes:
+            - id: identity-keys
+              uri: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/keys/**
+            - id: rule-engine-rules
+              uri: ${RULE_ENGINE_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/v1/rules/**
+            - id: alert-delivery-alerts
+              uri: ${ALERT_DELIVERY_SERVICE_URL:http://localhost:8084}
+              predicates:
+                - Path=/api/v1/alerts/**
+            # TODO Chặng 7: /api/v1/usage/** → billing:8085
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+
+    identity:
+      service:
+        url: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+- type: command
+  label: Lưu mốc bước 6.6
+  content: |
+    git add alert-delivery/Dockerfile gateway/src/main/resources/application.yml infra/docker-compose.yml
+    git commit -m "[step-6.6] alert-delivery: Dockerfile + fix healthcheck curl->wget + gateway route /api/v1/alerts"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-6.6)
+  url: https://github.com/KouTaru99/market-pulse/commit/a099d71

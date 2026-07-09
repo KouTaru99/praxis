@@ -1,0 +1,147 @@
+id: ad-04
+title: 'alert-delivery: DeliveryService — retry 1s/4s/16s + chống trùng'
+order: 4
+est_minutes: 35
+commit_ref: 9367c47
+goal: 'Viết DeliveryService: vòng lặp thử-gửi-rồi-chờ theo chính sách 1s/4s/16s, và AlertConsumer lắng nghe queue, chống xử lý trùng khi RabbitMQ giao lại message.'
+deliverable: DeliveryService (tối đa 4 lần gọi webhook) + AlertConsumer (@RabbitListener).
+outcome_preview: Sau bước này, một alert bị webhook từ chối tạm thời sẽ tự được thử lại đúng 3 lần theo nhịp giãn cách trước khi coi là thất bại hẳn.
+blocks:
+- type: prose
+  content: 'Đây là trái tim nghiệp vụ của cả service. `deliver()` làm ba việc: (1) kiểm tra trùng lặp, (2) lưu/lấy bản ghi Alert, (3) vòng lặp gửi-chờ-thử lại.'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/service/DeliveryService.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.service;
+
+    import com.marketpulse.alertdelivery.client.DeliveryAttemptResult;
+    import com.marketpulse.alertdelivery.client.WebhookClient;
+    import com.marketpulse.alertdelivery.client.WebhookPayload;
+    import com.marketpulse.alertdelivery.domain.Alert;
+    import com.marketpulse.alertdelivery.domain.AlertDeliveryAttempt;
+    import com.marketpulse.alertdelivery.repository.AlertDeliveryAttemptRepository;
+    import com.marketpulse.alertdelivery.repository.AlertRepository;
+    import com.marketpulse.common.event.AlertTriggeredEvent;
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.stereotype.Service;
+
+    import java.time.OffsetDateTime;
+    import java.util.Optional;
+    import java.util.UUID;
+
+    @Service
+    public class DeliveryService {
+
+        private static final Logger log = LoggerFactory.getLogger(DeliveryService.class);
+
+        // delay[i] = thời gian chờ SAU KHI attempt (i+1) thất bại, trước khi thử attempt (i+2)
+        // → tổng tối đa 4 lần gọi webhook (1 lần đầu + 3 lần thử lại), đúng R04: "retry sau 1s, 4s, 16s"
+        private static final long[] RETRY_DELAYS_MS = {1000, 4000, 16000};
+        private static final int MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
+
+        private final AlertRepository alertRepository;
+        private final AlertDeliveryAttemptRepository attemptRepository;
+        private final WebhookClient webhookClient;
+
+        public DeliveryService(AlertRepository alertRepository,
+                                AlertDeliveryAttemptRepository attemptRepository,
+                                WebhookClient webhookClient) {
+            this.alertRepository = alertRepository;
+            this.attemptRepository = attemptRepository;
+            this.webhookClient = webhookClient;
+        }
+
+        public void deliver(AlertTriggeredEvent event) {
+            UUID alertId = UUID.fromString(event.alertId());
+
+            Optional<Alert> existing = alertRepository.findById(alertId);
+            if (existing.isPresent() && !"PENDING".equals(existing.get().getStatus())) {
+                log.info("Alert {} đã ở trạng thái cuối ({}) — bỏ qua (RabbitMQ redeliver)",
+                        alertId, existing.get().getStatus());
+                return;
+            }
+
+            Alert alert = existing.orElseGet(() -> alertRepository.save(new Alert(
+                    alertId, UUID.fromString(event.ruleId()), UUID.fromString(event.tenantId()),
+                    event.symbol(), event.ruleType(), OffsetDateTime.parse(event.triggeredAt()),
+                    event.triggerValue(), event.webhookUrl())));
+
+            WebhookPayload payload = new WebhookPayload(event.alertId(), event.ruleId(), event.symbol(),
+                    event.ruleType(), event.triggeredAt(), event.triggerValue());
+
+            for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+                DeliveryAttemptResult result = webhookClient.send(event.webhookUrl(), payload);
+                attemptRepository.save(new AlertDeliveryAttempt(alertId, attempt, result.httpStatus(), result.outcome()));
+                log.info("Alert {} attempt {}/{}: {} (http={})",
+                        alertId, attempt, MAX_ATTEMPTS, result.outcome(), result.httpStatus());
+
+                if ("SUCCESS".equals(result.outcome())) {
+                    alert.markDelivered();
+                    alertRepository.save(alert);
+                    return;
+                }
+                if (!result.isRetryable()) {
+                    alert.markClientError();
+                    alertRepository.save(alert);
+                    return;
+                }
+                if (attempt < MAX_ATTEMPTS) {
+                    sleep(RETRY_DELAYS_MS[attempt - 1]);
+                }
+            }
+
+            alert.markFailed();
+            alertRepository.save(alert);
+        }
+
+        private void sleep(long ms) {
+            try {
+                Thread.sleep(ms);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+- type: callout
+  variant: warning
+  content: 'So với bản phác thảo kiến trúc ban đầu (một tiến trình `@Scheduled` quét bảng `alerts` mỗi 5 giây để tìm việc cần thử lại), code thật đơn giản hơn: `Thread.sleep()` NGAY TRONG luồng xử lý message của RabbitMQ Consumer. Nghĩa là khi một alert cần 3 lần thử lại, luồng đó bị CHIẾM tới ~21 giây (1s+4s+16s). Đây là đánh đổi có ý thức cho quy mô của lab: tần suất alert thấp hơn nhiều so với tần suất trade, nên chiếm một luồng consumer trong vài chục giây chưa gây nghẽn. Ở quy mô cảnh báo dày đặc hơn, thiết kế lại theo hướng `@Scheduled` (tách lịch thử lại khỏi luồng nhận message) sẽ đúng đắn hơn.'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/consumer/AlertConsumer.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.consumer;
+
+    import com.marketpulse.alertdelivery.config.RabbitConfig;
+    import com.marketpulse.alertdelivery.service.DeliveryService;
+    import com.marketpulse.common.event.AlertTriggeredEvent;
+    import org.springframework.amqp.rabbit.annotation.RabbitListener;
+    import org.springframework.stereotype.Component;
+
+    @Component
+    public class AlertConsumer {
+
+        private final DeliveryService deliveryService;
+
+        public AlertConsumer(DeliveryService deliveryService) {
+            this.deliveryService = deliveryService;
+        }
+
+        @RabbitListener(queues = RabbitConfig.ALERTS_QUEUE)
+        public void onAlert(AlertTriggeredEvent event) {
+            deliveryService.deliver(event);
+        }
+    }
+- type: callout
+  variant: info
+  content: 'Khoá tự nhiên `id = alertId` (bước 6.1) trả về giá trị ngay tại đây: nếu Alert đã tồn tại VÀ không còn ở `PENDING`, `deliver()` thoát sớm — bảo vệ trước việc RabbitMQ giao lại message (redelivery) khiến một alert bị gửi webhook hai lần.'
+- type: command
+  label: Lưu mốc bước 6.4
+  content: |
+    git add alert-delivery
+    git commit -m "[step-6.4] alert-delivery: DeliveryService (retry 1s/4s/16s, tối đa 4 attempt) + AlertConsumer, idempotent khi RabbitMQ redeliver"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-6.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/9367c47

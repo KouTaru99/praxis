@@ -1,0 +1,125 @@
+id: ad-03
+title: 'alert-delivery: WebhookClient — gọi thật, phân loại kết quả'
+order: 3
+est_minutes: 30
+commit_ref: 818aa18
+goal: 'Viết WebhookClient gửi POST tới webhook của tenant và phân loại kết quả thành 4 nhóm: thành công, lỗi phía tenant, lỗi phía server tenant, hoặc timeout.'
+deliverable: WebhookClient (WebClient, timeout 5s) + WebhookPayload (6 field đúng R04) + DeliveryAttemptResult (isRetryable()).
+outcome_preview: Sau bước này, hệ có thể gửi một webhook thật và biết chính xác nên coi lần gửi đó là xong hay cần thử lại.
+blocks:
+- type: prose
+  content: '`WebhookClient` KHÔNG có `baseUrl` cố định — khác mọi WebClient đã dùng trước đây trong dự án — vì mỗi alert gọi tới một URL riêng, do chính tenant cấu hình lúc tạo rule.'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/client/WebhookClient.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.client;
+
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.http.MediaType;
+    import org.springframework.http.ResponseEntity;
+    import org.springframework.stereotype.Component;
+    import org.springframework.web.reactive.function.client.WebClient;
+    import org.springframework.web.reactive.function.client.WebClientResponseException;
+
+    import java.time.Duration;
+
+    @Component
+    public class WebhookClient {
+
+        private static final Logger log = LoggerFactory.getLogger(WebhookClient.class);
+
+        private final WebClient webClient;
+
+        public WebhookClient(WebClient.Builder builder) {
+            // không baseUrl cố định: mỗi alert có webhookUrl riêng của tenant
+            this.webClient = builder.build();
+        }
+
+        public DeliveryAttemptResult send(String webhookUrl, WebhookPayload payload) {
+            try {
+                ResponseEntity<Void> response = webClient.post()
+                        .uri(webhookUrl)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(payload)
+                        .retrieve()
+                        .toBodilessEntity()
+                        .timeout(Duration.ofSeconds(5))
+                        .block();
+                // retrieve() ném WebClientResponseException ở nhánh 4xx/5xx nên tới đây luôn là 2xx
+                return DeliveryAttemptResult.success(response.getStatusCode().value());
+            } catch (WebClientResponseException e) {
+                int status = e.getStatusCode().value();
+                if (e.getStatusCode().is4xxClientError()) {
+                    return DeliveryAttemptResult.clientError(status);
+                }
+                return DeliveryAttemptResult.serverError(status);
+            } catch (Exception e) {
+                log.warn("Webhook lỗi kết nối/timeout: url={} error={}", webhookUrl, e.toString());
+                return DeliveryAttemptResult.timeout();
+            }
+        }
+    }
+- type: prose
+  content: 'Payload gửi ra ngoài **chỉ đúng 6 field** theo đặc tả R04 — không kèm `tenantId` hay `webhookUrl`, vì đó là thông tin nội bộ, tenant không cần (và không nên) thấy:'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/client/WebhookPayload.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.client;
+
+    /**
+     * Payload gửi tới webhookUrl của tenant — CHỈ đúng 6 field theo R04, không kèm
+     * tenantId/webhookUrl (thông tin nội bộ, không cần lộ ra ngoài).
+     */
+    public record WebhookPayload(
+            String alertId, String ruleId, String symbol,
+            String ruleType, String triggeredAt, String triggerValue
+    ) {}
+- type: prose
+  content: '`DeliveryAttemptResult` gói kết quả một lần gửi và biết tự trả lời câu hỏi "có nên thử lại không":'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/client/DeliveryAttemptResult.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.client;
+
+    /** outcome: SUCCESS | CLIENT_ERROR | SERVER_ERROR | TIMEOUT. httpStatus null nếu không có response thật. */
+    public record DeliveryAttemptResult(String outcome, Integer httpStatus) {
+
+        public static DeliveryAttemptResult success(int status) {
+            return new DeliveryAttemptResult("SUCCESS", status);
+        }
+
+        public static DeliveryAttemptResult clientError(int status) {
+            return new DeliveryAttemptResult("CLIENT_ERROR", status);
+        }
+
+        public static DeliveryAttemptResult serverError(int status) {
+            return new DeliveryAttemptResult("SERVER_ERROR", status);
+        }
+
+        public static DeliveryAttemptResult timeout() {
+            return new DeliveryAttemptResult("TIMEOUT", null);
+        }
+
+        public boolean isRetryable() {
+            return "SERVER_ERROR".equals(outcome) || "TIMEOUT".equals(outcome);
+        }
+    }
+- type: callout
+  variant: info
+  content: 'Phân biệt `CLIENT_ERROR` (4xx) khỏi `SERVER_ERROR`/`TIMEOUT` (5xx/timeout) không phải chi tiết vặt: 4xx nghĩa là endpoint của TENANT chủ động từ chối (URL sai, xác thực sai, payload họ không chấp nhận) — gửi lại y hệt request đó 3 lần nữa cũng vẫn 4xx, chỉ tổ làm phiền. 5xx/timeout thường là sự cố *tạm thời* (server tenant quá tải, mạng chập chờn) — đáng thử lại. Đây là lý do `isRetryable()` chỉ trả `true` cho hai loại sau.'
+- type: callout
+  variant: tip
+  content: 'Timeout 5 giây là một lựa chọn cân bằng: đủ dài để một webhook hơi chậm vẫn kịp trả lời, đủ ngắn để không giữ luồng xử lý alert quá lâu nếu endpoint tenant treo hẳn.'
+- type: command
+  label: Lưu mốc bước 6.3
+  content: |
+    git add alert-delivery
+    git commit -m "[step-6.3] alert-delivery: WebhookClient — POST payload đúng schema R04, phân loại 2xx/4xx/5xx/timeout"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-6.3)
+  url: https://github.com/KouTaru99/market-pulse/commit/818aa18

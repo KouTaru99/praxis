@@ -1,0 +1,139 @@
+id: ad-01
+title: 'alert-delivery: schema database + cấu hình'
+order: 1
+est_minutes: 25
+commit_ref: ae98c19
+goal: 'Dựng database cho alert-delivery: 2 bảng ghi alert đã bắn và lịch sử từng lần gửi webhook, cấu hình port 8084.'
+deliverable: build.gradle.kts (deps amqp/jpa/webflux/flyway) + application.yml + V1__init.sql (alerts + alert_delivery_attempts).
+outcome_preview: 'Sau bước này, alert-delivery có chỗ lưu: mỗi alert một dòng trạng thái sống, mỗi lần thử gửi webhook một dòng lịch sử.'
+blocks:
+- type: prose
+  content: 'Chặng 6 mở **Phần C**. rule-engine (Chặng 5) đã biết *khi nào* cần cảnh báo — nhưng bắn ra một sự kiện nội bộ (`AlertTriggeredEvent`) thì tenant chưa nhận được gì cả. **alert-delivery** là mảnh biến sự kiện đó thành một cuộc gọi HTTP thật tới hệ thống của tenant, và quan trọng không kém: **tự thử lại** khi webhook đó tạm thời lỗi, thay vì bắn một lần rồi bỏ mặc.'
+- type: diagram
+  content: |
+    sequenceDiagram
+      participant RE as rule-engine
+      participant EX as exchange market-pulse.alerts
+      participant AD as alert-delivery
+      participant DB as alert-delivery-db
+      participant WH as Webhook cua tenant
+      RE->>EX: AlertTriggeredEvent (alertId lam khoa)
+      EX->>AD: consume (queue alert-delivery.alerts)
+      AD->>DB: luu Alert(status=PENDING)
+      AD->>WH: POST payload (6 field)
+      alt 2xx
+        WH-->>AD: 200
+        AD->>DB: status=DELIVERED
+      else 5xx / timeout
+        WH-->>AD: loi tam thoi
+        AD->>AD: cho 1s roi 4s roi 16s, thu lai (toi da 4 lan goi)
+        AD->>DB: status=FAILED neu het luot
+      else 4xx
+        WH-->>AD: tu choi
+        AD->>DB: status=CLIENT_ERROR (khong thu lai)
+      end
+- type: prose
+  content: 'Bắt đầu từ database — 2 bảng. Điểm đáng chú ý nhất nằm ở cột khoá chính của `alerts`:'
+- type: callout
+  variant: info
+  content: 'Cột `id` của bảng `alerts` **KHÔNG** có `DEFAULT gen_random_uuid()` — nó luôn được set bằng đúng `alertId` lấy từ `AlertTriggeredEvent`. Đây là một **khoá tự nhiên** (natural key) có chủ đích: RabbitMQ có thể giao cùng một message hai lần (at-least-once delivery), và nếu `alertId` đã tồn tại trong bảng, service biết ngay đây là bản redeliver — không tạo dòng mới, không gửi webhook trùng. Bảng `alert_delivery_attempts` tách riêng: mỗi lần *thử gửi* (kể cả thất bại) là một dòng lịch sử, không ghi đè.'
+- type: code
+  filename: alert-delivery/src/main/resources/db/migration/V1__init.sql
+  lang: sql
+  content: |
+    -- id KHÔNG có DEFAULT gen_random_uuid(): luôn được set = alertId của AlertTriggeredEvent
+    -- (khoá tự nhiên, dùng để phát hiện message bị RabbitMQ redeliver, tránh gửi webhook trùng)
+    CREATE TABLE alerts (
+      id            UUID         PRIMARY KEY,
+      rule_id       UUID         NOT NULL,
+      tenant_id     UUID         NOT NULL,
+      symbol        VARCHAR(20)  NOT NULL,
+      rule_type     VARCHAR(30)  NOT NULL,
+      triggered_at  TIMESTAMPTZ  NOT NULL,
+      trigger_value VARCHAR(50)  NOT NULL,
+      webhook_url   VARCHAR(500) NOT NULL,
+      status        VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+      created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX idx_alerts_tenant ON alerts(tenant_id, created_at DESC);
+
+    CREATE TABLE alert_delivery_attempts (
+      id             BIGSERIAL    PRIMARY KEY,
+      alert_id       UUID         NOT NULL REFERENCES alerts(id),
+      attempt_number INT          NOT NULL,
+      attempted_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+      http_status    INT,
+      outcome        VARCHAR(20)  NOT NULL
+    );
+
+    CREATE INDEX idx_attempts_alert ON alert_delivery_attempts(alert_id);
+- type: prose
+  content: 'Dependency có `webflux` dù alert-delivery không phải một ứng dụng reactive toàn phần — chỉ để dùng `WebClient`, client HTTP hiện đại của Spring, cho việc gọi webhook (Chặng 3):'
+- type: code
+  filename: alert-delivery/build.gradle.kts
+  lang: kotlin
+  content: |
+    plugins {
+        id("org.springframework.boot")
+        id("io.spring.dependency-management")
+    }
+
+    dependencies {
+        implementation("org.springframework.boot:spring-boot-starter-web")
+        implementation("org.springframework.boot:spring-boot-starter-actuator")
+        implementation("org.springframework.boot:spring-boot-starter-amqp")
+        implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+        implementation("org.springframework.boot:spring-boot-starter-webflux")
+        implementation("org.flywaydb:flyway-core")
+        implementation("org.flywaydb:flyway-database-postgresql")
+        runtimeOnly("org.postgresql:postgresql")
+        implementation(project(":common"))
+        testImplementation("org.springframework.boot:spring-boot-starter-test")
+    }
+- type: code
+  filename: alert-delivery/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8084
+
+    spring:
+      application:
+        name: alert-delivery
+      rabbitmq:
+        host: ${SPRING_RABBITMQ_HOST:localhost}
+        port: ${SPRING_RABBITMQ_PORT:5672}
+        username: ${SPRING_RABBITMQ_USERNAME:guest}
+        password: ${SPRING_RABBITMQ_PASSWORD:guest}
+      datasource:
+        url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5435/alert_delivery}
+        username: ${SPRING_DATASOURCE_USERNAME:alert_delivery_user}
+        password: ${SPRING_DATASOURCE_PASSWORD:change_me}
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        open-in-view: false
+      flyway:
+        enabled: true
+      jackson:
+        serialization:
+          write-dates-as-timestamps: false
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: command
+  label: Lưu mốc bước 6.1
+  content: |
+    git add alert-delivery
+    git commit -m "[step-6.1] alert-delivery: deps (amqp/jpa/webflux/flyway) + config port 8084 + Flyway V1 (alerts + alert_delivery_attempts)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-6.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/ae98c19

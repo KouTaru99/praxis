@@ -1,0 +1,171 @@
+id: ad-05
+title: 'alert-delivery: REST API tra cứu lịch sử alert'
+order: 5
+est_minutes: 25
+commit_ref: d94be19
+goal: Mở API cho tenant (và dashboard Chặng 8 sau này) xem danh sách alert đã bắn và chi tiết từng lần thử gửi webhook.
+deliverable: AlertController (GET list phân trang + GET detail kèm lịch sử) + 5 DTO + xử lý lỗi 404.
+outcome_preview: 'Sau bước này, ai gọi API cũng thấy được: alert nào đã bắn, trạng thái ra sao, và (nếu cần) từng lần thử gửi webhook diễn ra thế nào.'
+blocks:
+- type: prose
+  content: 'Hai endpoint dưới `/api/v1/alerts`: danh sách phân trang theo tenant, và chi tiết một alert kèm toàn bộ lịch sử `attempts`. Cùng quy ước `X-Tenant-Id` do gateway gắn vào — controller tin tưởng header này, không tự xác thực lại.'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/controller/AlertController.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.controller;
+
+    import com.marketpulse.alertdelivery.domain.Alert;
+    import com.marketpulse.alertdelivery.dto.AlertAttemptResponse;
+    import com.marketpulse.alertdelivery.dto.AlertDetailResponse;
+    import com.marketpulse.alertdelivery.dto.AlertResponse;
+    import com.marketpulse.alertdelivery.exception.AlertNotFoundException;
+    import com.marketpulse.alertdelivery.repository.AlertDeliveryAttemptRepository;
+    import com.marketpulse.alertdelivery.repository.AlertRepository;
+    import org.springframework.data.domain.Page;
+    import org.springframework.data.domain.Pageable;
+    import org.springframework.data.domain.Sort;
+    import org.springframework.data.web.PageableDefault;
+    import org.springframework.web.bind.annotation.*;
+
+    import java.util.List;
+    import java.util.UUID;
+
+    @RestController
+    @RequestMapping("/api/v1/alerts")
+    public class AlertController {
+
+        private final AlertRepository alertRepository;
+        private final AlertDeliveryAttemptRepository attemptRepository;
+
+        public AlertController(AlertRepository alertRepository, AlertDeliveryAttemptRepository attemptRepository) {
+            this.alertRepository = alertRepository;
+            this.attemptRepository = attemptRepository;
+        }
+
+        @GetMapping
+        public Page<AlertResponse> list(
+                @RequestHeader("X-Tenant-Id") UUID tenantId,
+                @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC) Pageable pageable) {
+            return alertRepository.findByTenantId(tenantId, pageable).map(AlertResponse::from);
+        }
+
+        @GetMapping("/{id}")
+        public AlertDetailResponse detail(@PathVariable UUID id, @RequestHeader("X-Tenant-Id") UUID tenantId) {
+            Alert alert = alertRepository.findById(id)
+                    .filter(a -> a.getTenantId().equals(tenantId))
+                    .orElseThrow(AlertNotFoundException::new);
+            List<AlertAttemptResponse> attempts = attemptRepository.findByAlertIdOrderByAttemptNumberAsc(id).stream()
+                    .map(AlertAttemptResponse::from)
+                    .toList();
+            return AlertDetailResponse.from(alert, attempts);
+        }
+    }
+- type: prose
+  content: '5 DTO tách bạch dữ liệu trả ra API khỏi entity DB:'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/dto/AlertResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.dto;
+
+    import com.marketpulse.alertdelivery.domain.Alert;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    public record AlertResponse(
+            UUID id, UUID ruleId, String symbol, String ruleType,
+            OffsetDateTime triggeredAt, String triggerValue, String status, OffsetDateTime createdAt
+    ) {
+        public static AlertResponse from(Alert a) {
+            return new AlertResponse(a.getId(), a.getRuleId(), a.getSymbol(), a.getRuleType(),
+                    a.getTriggeredAt(), a.getTriggerValue(), a.getStatus(), a.getCreatedAt());
+        }
+    }
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/dto/AlertDetailResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.dto;
+
+    import com.marketpulse.alertdelivery.domain.Alert;
+
+    import java.time.OffsetDateTime;
+    import java.util.List;
+    import java.util.UUID;
+
+    public record AlertDetailResponse(
+            UUID id, UUID ruleId, String symbol, String ruleType,
+            OffsetDateTime triggeredAt, String triggerValue, String status, OffsetDateTime createdAt,
+            List<AlertAttemptResponse> attempts
+    ) {
+        public static AlertDetailResponse from(Alert a, List<AlertAttemptResponse> attempts) {
+            return new AlertDetailResponse(a.getId(), a.getRuleId(), a.getSymbol(), a.getRuleType(),
+                    a.getTriggeredAt(), a.getTriggerValue(), a.getStatus(), a.getCreatedAt(), attempts);
+        }
+    }
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/dto/AlertAttemptResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.dto;
+
+    import com.marketpulse.alertdelivery.domain.AlertDeliveryAttempt;
+
+    import java.time.OffsetDateTime;
+
+    public record AlertAttemptResponse(
+            int attemptNumber, OffsetDateTime attemptedAt, Integer httpStatus, String outcome
+    ) {
+        public static AlertAttemptResponse from(AlertDeliveryAttempt a) {
+            return new AlertAttemptResponse(a.getAttemptNumber(), a.getAttemptedAt(), a.getHttpStatus(), a.getOutcome());
+        }
+    }
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/dto/ErrorResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.dto;
+
+    public record ErrorResponse(String error) {}
+- type: prose
+  content: 'Và xử lý lỗi khi gọi chi tiết một alert không tồn tại (hoặc không thuộc tenant đang gọi) — quen thuộc với mẫu `@RestControllerAdvice` đã dùng ở identity Chặng 2:'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/exception/AlertNotFoundException.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.exception;
+
+    public class AlertNotFoundException extends RuntimeException {}
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/web/GlobalExceptionHandler.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.web;
+
+    import com.marketpulse.alertdelivery.dto.ErrorResponse;
+    import com.marketpulse.alertdelivery.exception.AlertNotFoundException;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ExceptionHandler;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+    import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+    @RestControllerAdvice
+    public class GlobalExceptionHandler {
+
+        @ExceptionHandler(AlertNotFoundException.class)
+        @ResponseStatus(HttpStatus.NOT_FOUND)
+        public ErrorResponse handleAlertNotFound(AlertNotFoundException e) {
+            return new ErrorResponse("ALERT_NOT_FOUND");
+        }
+    }
+- type: command
+  label: Lưu mốc bước 6.5
+  content: |
+    git add alert-delivery
+    git commit -m "[step-6.5] alert-delivery: REST API GET /api/v1/alerts (phân trang theo tenant) + GET /{id} (kèm attempt history)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-6.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/d94be19

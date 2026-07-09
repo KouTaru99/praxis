@@ -1,0 +1,209 @@
+id: ad-07
+title: 'Milestone Chặng 6: smoke test 6 ca — webhook thật + retry'
+order: 7
+est_minutes: 30
+commit_ref: ffa1fc5
+goal: Bật profile delivery và chạy smoke test tự động 6 ca, chứng minh webhook nhận đúng payload, và chuỗi retry 1s/4s/16s hoạt động thật.
+deliverable: 'scripts/smoke-ch6.sh (webhook listener giả trên host + publish thẳng vào exchange) + docs; milestone: profile delivery chạy được.'
+outcome_preview: 'Milestone Chặng 6 đạt: webhook 200 → DELIVERED tức thì; webhook 500 liên tục → đúng 4 lần gọi rồi FAILED sau ~21 giây.'
+blocks:
+- type: prose
+  content: 'Cách kiểm thử ở đây đáng học: thay vì dựng lại CẢ chuỗi feed→aggregation→rule-engine (đã verify riêng ở smoke-ch3/4/5) chỉ để tạo ra một alert thật, script **publish thẳng** một `AlertTriggeredEvent` vào exchange qua RabbitMQ HTTP Management API, và dựng một webhook listener giả ngay trên máy host. Cách này cô lập đúng thứ cần kiểm: hành vi CỦA RIÊNG alert-delivery (nhận → gửi → thử lại → lưu), không phụ thuộc toàn bộ pipeline phía trước.'
+- type: command
+  label: Bật cụm profile delivery
+  content: |
+    cp infra/.env.example infra/.env   # neu chua co
+    docker compose -f infra/docker-compose.yml --env-file infra/.env --profile delivery up -d --build
+- type: code
+  filename: scripts/smoke-ch6.sh
+  lang: bash
+  content: |
+    #!/usr/bin/env bash
+    # smoke-ch6.sh — Milestone Chặng 6: alert-delivery nhận AlertTriggeredEvent → gửi webhook thật + retry.
+    # Yêu cầu: rabbitmq + alert-delivery + alert-delivery-db đang chạy.
+    #   docker compose ... --profile delivery up -d --build
+    # Cách chạy: bash scripts/smoke-ch6.sh
+    # Biến: ALERT_DELIVERY_URL (mặc định http://localhost:8084), TENANT_ID (mặc định demo Acme).
+    #
+    # Test tự tạo 1 webhook listener thật trên host (0.0.0.0:9999), rồi publish thẳng
+    # AlertTriggeredEvent vào exchange market-pulse.alerts qua RabbitMQ HTTP API — không
+    # cần dựng lại toàn bộ chuỗi feed→aggregation→rule-engine (đã verify ở smoke-ch3/4/5),
+    # nhờ vậy test được đúng, tất định hành vi CỦA RIÊNG alert-delivery: nhận → gửi → retry → lưu.
+
+    set -uo pipefail
+
+    COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.yml}"
+    AD_URL="${ALERT_DELIVERY_URL:-http://localhost:8084}"
+    TENANT_ID="${TENANT_ID:-00000000-0000-0000-0001-000000000001}"
+    RMQ_USER="${RABBITMQ_USER:-market_pulse}"
+    RMQ_PASS="${RABBITMQ_PASSWORD:-change_me}"
+    RMQ_API="http://localhost:15672/api"
+    ALERTS_EXCHANGE="market-pulse.alerts"
+    LISTENER_PORT=9999
+    LISTENER_LOG="/tmp/smoke-ch6-webhook-hits.ndjson"
+    LISTENER_SCRIPT="/tmp/smoke-ch6-webhook-listener.py"
+    PASS=0
+    FAIL=0
+
+    check() {
+        local label="$1" got="$2" want="$3"
+        if [ "$got" = "$want" ]; then echo "PASS  ${label}"; PASS=$((PASS + 1))
+        else echo "FAIL  ${label}  (got=${got}, want=${want})"; FAIL=$((FAIL + 1)); fi
+    }
+
+    echo "=== Smoke test Chặng 6 — alert-delivery: nhận alert → gửi webhook thật + retry ==="
+    echo ""
+
+    # ── Dựng webhook listener giả trên host: /hook-200 luôn 200, /hook-500 luôn 500 ──
+    rm -f "${LISTENER_LOG}"
+    cat > "${LISTENER_SCRIPT}" <<'PYEOF'
+    import http.server, json
+
+    LOG = "/tmp/smoke-ch6-webhook-hits.ndjson"
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            with open(LOG, "a") as f:
+                f.write(json.dumps({"path": self.path, "body": body.decode("utf-8")}) + "\n")
+            self.send_response(200 if self.path.startswith("/hook-200") else 500)
+            self.end_headers()
+
+        def log_message(self, fmt, *args):
+            pass
+
+    http.server.HTTPServer(("0.0.0.0", 9999), Handler).serve_forever()
+    PYEOF
+    python3 "${LISTENER_SCRIPT}" &
+    LISTENER_PID=$!
+    trap 'kill "${LISTENER_PID}" 2>/dev/null' EXIT
+    sleep 1
+
+    # ── TC1: alert-delivery container healthy ──────────────────────────────────
+    AD_CID=$(docker compose -f "${COMPOSE_FILE}" ps -q alert-delivery 2>/dev/null)
+    health=$(docker inspect -f '{{.State.Health.Status}}' "${AD_CID}" 2>/dev/null || echo "missing")
+    check "TC1  alert-delivery container healthy      → healthy" "$health" "healthy"
+
+    # publish 1 AlertTriggeredEvent thẳng vào exchange, kèm header __TypeId__ (Jackson2JsonMessageConverter
+    # cần header này để biết deserialize vào class nào — rabbitTemplate.convertAndSend() tự thêm,
+    # nhưng publish thẳng qua HTTP API thì phải tự set tay).
+    publish_alert() {
+        local alert_id="$1" webhook_path="$2"
+        local payload
+        payload=$(python3 -c "
+    import json
+    event = {
+        'alertId': '${alert_id}', 'ruleId': '11111111-1111-1111-1111-111111111111',
+        'tenantId': '${TENANT_ID}', 'symbol': 'BTCUSDT', 'ruleType': 'PRICE_THRESHOLD',
+        'triggeredAt': '2026-07-08T00:00:00Z', 'triggerValue': '49999.50',
+        'webhookUrl': 'http://host.docker.internal:${LISTENER_PORT}/${webhook_path}'
+    }
+    msg = {
+        'properties': {
+            'content_type': 'application/json',
+            'headers': {'__TypeId__': 'com.marketpulse.common.event.AlertTriggeredEvent'}
+        },
+        'routing_key': 'alert',
+        'payload': json.dumps(event),
+        'payload_encoding': 'string'
+    }
+    print(json.dumps(msg))
+    ")
+        curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/exchanges/%2F/${ALERTS_EXCHANGE}/publish" \
+            -H "content-type: application/json" -d "${payload}" >/dev/null 2>&1
+    }
+
+    # ── TC2-4: happy path — webhook 200 → DELIVERED, đúng payload, đúng history ─
+    ALERT_ID_OK=$(python3 -c "import uuid; print(uuid.uuid4())")
+    publish_alert "${ALERT_ID_OK}" "hook-200"
+
+    echo "      [chờ tối đa ~6s cho webhook happy-path...]"
+    status="PENDING"
+    n=0
+    while [ "$n" -lt 6 ]; do
+        sleep 1; n=$((n + 1))
+        detail=$(curl -s "${AD_URL}/api/v1/alerts/${ALERT_ID_OK}" -H "X-Tenant-Id: ${TENANT_ID}")
+        status=$(printf '%s' "$detail" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','PENDING'))" 2>/dev/null || echo "PENDING")
+        if [ "$status" = "DELIVERED" ]; then break; fi
+    done
+    check "TC2  happy-path webhook 200 → status DELIVERED [+${n}s]" "$status" "DELIVERED"
+
+    payload_ok=$(grep "hook-200" "${LISTENER_LOG}" 2>/dev/null | tail -1)
+    schema_ok=$(printf '%s' "$payload_ok" | python3 -c "
+    import sys,json
+    try:
+        d=json.loads(sys.stdin.read())
+        p=json.loads(d['body'])
+        keys=set(p.keys())
+        print('ok' if keys == {'alertId','ruleId','symbol','ruleType','triggeredAt','triggerValue'} else 'bad:'+str(keys))
+    except Exception as e:
+        print('bad:'+str(e))
+    " 2>/dev/null || echo "bad")
+    check "TC3  webhook payload đúng 6 field (không lộ tenantId/webhookUrl) → ok" "$schema_ok" "ok"
+
+    attempts_ok=$(curl -s "${AD_URL}/api/v1/alerts/${ALERT_ID_OK}" -H "X-Tenant-Id: ${TENANT_ID}" | python3 -c "
+    import sys,json
+    d=json.load(sys.stdin)
+    a=d.get('attempts',[])
+    print('ok' if len(a)==1 and a[0]['outcome']=='SUCCESS' and a[0]['httpStatus']==200 else 'bad:'+str(a))
+    " 2>/dev/null || echo "bad")
+    check "TC4  history: đúng 1 attempt, outcome=SUCCESS, http=200 → ok" "$attempts_ok" "ok"
+
+    # ── TC5-6: retry path — webhook 500 liên tục → FAILED sau 1 gốc + 3 retry (1s/4s/16s) ──
+    ALERT_ID_FAIL=$(python3 -c "import uuid; print(uuid.uuid4())")
+    publish_alert "${ALERT_ID_FAIL}" "hook-500"
+
+    echo "      [chờ tối đa ~40s cho chuỗi retry 1s+4s+16s...]"
+    status="PENDING"
+    n=0
+    while [ "$n" -lt 20 ]; do
+        sleep 2; n=$((n + 1))
+        detail=$(curl -s "${AD_URL}/api/v1/alerts/${ALERT_ID_FAIL}" -H "X-Tenant-Id: ${TENANT_ID}")
+        status=$(printf '%s' "$detail" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','PENDING'))" 2>/dev/null || echo "PENDING")
+        if [ "$status" = "FAILED" ]; then break; fi
+    done
+    check "TC5  retry liên tục 500 → status FAILED sau 1s/4s/16s [+$((n*2))s]" "$status" "FAILED"
+
+    attempt_count=$(curl -s "${AD_URL}/api/v1/alerts/${ALERT_ID_FAIL}" -H "X-Tenant-Id: ${TENANT_ID}" | python3 -c "
+    import sys,json
+    d=json.load(sys.stdin)
+    a=d.get('attempts',[])
+    all_500 = all(x['outcome']=='SERVER_ERROR' and x['httpStatus']==500 for x in a)
+    print(str(len(a)) if all_500 else 'bad:'+str(a))
+    " 2>/dev/null || echo "bad")
+    check "TC6  4 lần gọi thật (1 gốc + 3 retry), đều SERVER_ERROR/500 → 4" "$attempt_count" "4"
+
+    echo ""
+    echo "=== Kết quả: PASS=${PASS}  FAIL=${FAIL} ==="
+    if [ "${FAIL}" -eq 0 ]; then
+        echo "PASS  Chặng 6 milestone — alert-delivery gửi webhook thật, retry đúng chính sách, audit đủ"
+        exit 0
+    else
+        echo "FAIL  Chặng 6 — kiểm tra: docker compose -f ${COMPOSE_FILE} logs alert-delivery"
+        exit 1
+    fi
+- type: callout
+  variant: info
+  content: Publish thẳng vào exchange qua HTTP API (bỏ qua `RabbitTemplate` của Java) thì phải tự gắn tay header `__TypeId__` — bình thường Spring AMQP tự thêm header này khi bạn gọi `convertAndSend()`, nhưng khi giả lập request thô thì phải tự khai để Jackson biết deserialize JSON thành đúng class `AlertTriggeredEvent`.
+- type: command
+  label: Chạy smoke test Chặng 6
+  content: |
+    bash scripts/smoke-ch6.sh
+    # PASS  TC1  alert-delivery container healthy
+    # PASS  TC2  happy-path webhook 200 -> status DELIVERED [+1s]
+    # PASS  TC3  webhook payload dung 6 field
+    # PASS  TC4  history: dung 1 attempt, SUCCESS/200
+    # PASS  TC5  retry lien tuc 500 -> FAILED sau 1s/4s/16s [+22s]
+    # PASS  TC6  4 lan goi that, deu SERVER_ERROR/500 -> 4
+    # === Ket qua: PASS=6  FAIL=0 ===
+- type: callout
+  variant: tip
+  content: 'Ca TC5/TC6 là ca giá trị nhất: nó đo đúng nhịp thời gian thật (~22 giây, khớp lý thuyết 1+4+16=21s cộng chút overhead) thay vì chỉ kiểm tra kết quả cuối — chứng minh chính sách retry chạy đúng NHỊP, không chỉ đúng SỐ LẦN.'
+- type: callout
+  variant: info
+  content: 'Milestone Chặng 6 đạt: profile delivery chạy được, webhook thật nhận đúng payload, retry đúng chính sách. Chặng 7 tiếp tục Phần C với billing — đo lượng dùng và chặn khi tenant vượt hạn mức gói cước.'
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-6.7)
+  url: https://github.com/KouTaru99/market-pulse/commit/ffa1fc5

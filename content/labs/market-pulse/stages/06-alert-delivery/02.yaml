@@ -1,0 +1,232 @@
+id: ad-02
+title: 'alert-delivery: entity, repository & RabbitMQ topology'
+order: 2
+est_minutes: 30
+commit_ref: '1043265'
+goal: Viết 2 entity JPA, 2 repository, và cấu hình RabbitMQ để alert-delivery mở queue riêng lắng nghe exchange alerts.
+deliverable: Alert + AlertDeliveryAttempt entity (encapsulation qua method nghiệp vụ) + 2 repository + RabbitConfig.
+outcome_preview: Sau bước này, alert-delivery đã có tầng dữ liệu đầy đủ và đã đăng ký lắng nghe đúng exchange rule-engine bắn ra.
+blocks:
+- type: prose
+  content: Hai **entity** ánh xạ 2 bảng. Chú ý `Alert` không có setter cho `status` — chỉ có 3 method nghiệp vụ `markDelivered()/markClientError()/markFailed()`. Cách này buộc mọi thay đổi trạng thái phải đi qua một trong ba con đường có ý nghĩa rõ ràng, thay vì gán chuỗi tuỳ tiện ở đâu đó.
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/domain/Alert.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.domain;
+
+    import jakarta.persistence.*;
+    import org.hibernate.annotations.CreationTimestamp;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    @Entity
+    @Table(name = "alerts")
+    public class Alert {
+
+        @Id
+        private UUID id;
+
+        @Column(name = "rule_id", nullable = false)
+        private UUID ruleId;
+
+        @Column(name = "tenant_id", nullable = false)
+        private UUID tenantId;
+
+        @Column(nullable = false, length = 20)
+        private String symbol;
+
+        @Column(name = "rule_type", nullable = false, length = 30)
+        private String ruleType;
+
+        @Column(name = "triggered_at", nullable = false)
+        private OffsetDateTime triggeredAt;
+
+        @Column(name = "trigger_value", nullable = false, length = 50)
+        private String triggerValue;
+
+        @Column(name = "webhook_url", nullable = false, length = 500)
+        private String webhookUrl;
+
+        @Column(nullable = false, length = 20)
+        private String status = "PENDING";
+
+        @CreationTimestamp
+        @Column(name = "created_at", nullable = false, updatable = false)
+        private OffsetDateTime createdAt;
+
+        protected Alert() {}
+
+        public Alert(UUID id, UUID ruleId, UUID tenantId, String symbol, String ruleType,
+                     OffsetDateTime triggeredAt, String triggerValue, String webhookUrl) {
+            this.id = id;
+            this.ruleId = ruleId;
+            this.tenantId = tenantId;
+            this.symbol = symbol;
+            this.ruleType = ruleType;
+            this.triggeredAt = triggeredAt;
+            this.triggerValue = triggerValue;
+            this.webhookUrl = webhookUrl;
+        }
+
+        public void markDelivered() { this.status = "DELIVERED"; }
+        public void markClientError() { this.status = "CLIENT_ERROR"; }
+        public void markFailed() { this.status = "FAILED"; }
+
+        public UUID getId() { return id; }
+        public UUID getRuleId() { return ruleId; }
+        public UUID getTenantId() { return tenantId; }
+        public String getSymbol() { return symbol; }
+        public String getRuleType() { return ruleType; }
+        public OffsetDateTime getTriggeredAt() { return triggeredAt; }
+        public String getTriggerValue() { return triggerValue; }
+        public String getWebhookUrl() { return webhookUrl; }
+        public String getStatus() { return status; }
+        public OffsetDateTime getCreatedAt() { return createdAt; }
+    }
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/domain/AlertDeliveryAttempt.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.domain;
+
+    import jakarta.persistence.*;
+    import org.hibernate.annotations.CreationTimestamp;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    @Entity
+    @Table(name = "alert_delivery_attempts")
+    public class AlertDeliveryAttempt {
+
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private Long id;
+
+        @Column(name = "alert_id", nullable = false)
+        private UUID alertId;
+
+        @Column(name = "attempt_number", nullable = false)
+        private int attemptNumber;
+
+        @CreationTimestamp
+        @Column(name = "attempted_at", nullable = false, updatable = false)
+        private OffsetDateTime attemptedAt;
+
+        /** null khi không có response thật (timeout / connection refused). */
+        @Column(name = "http_status")
+        private Integer httpStatus;
+
+        @Column(nullable = false, length = 20)
+        private String outcome;
+
+        protected AlertDeliveryAttempt() {}
+
+        public AlertDeliveryAttempt(UUID alertId, int attemptNumber, Integer httpStatus, String outcome) {
+            this.alertId = alertId;
+            this.attemptNumber = attemptNumber;
+            this.httpStatus = httpStatus;
+            this.outcome = outcome;
+        }
+
+        public Long getId() { return id; }
+        public UUID getAlertId() { return alertId; }
+        public int getAttemptNumber() { return attemptNumber; }
+        public OffsetDateTime getAttemptedAt() { return attemptedAt; }
+        public Integer getHttpStatus() { return httpStatus; }
+        public String getOutcome() { return outcome; }
+    }
+- type: prose
+  content: 'Hai **repository** Spring Data JPA đơn giản — không cần logic đặc biệt, chỉ cần đúng câu truy vấn:'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/repository/AlertRepository.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.repository;
+
+    import com.marketpulse.alertdelivery.domain.Alert;
+    import org.springframework.data.domain.Page;
+    import org.springframework.data.domain.Pageable;
+    import org.springframework.data.jpa.repository.JpaRepository;
+
+    import java.util.UUID;
+
+    public interface AlertRepository extends JpaRepository<Alert, UUID> {
+        Page<Alert> findByTenantId(UUID tenantId, Pageable pageable);
+    }
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/repository/AlertDeliveryAttemptRepository.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.repository;
+
+    import com.marketpulse.alertdelivery.domain.AlertDeliveryAttempt;
+    import org.springframework.data.jpa.repository.JpaRepository;
+
+    import java.util.List;
+    import java.util.UUID;
+
+    public interface AlertDeliveryAttemptRepository extends JpaRepository<AlertDeliveryAttempt, Long> {
+        List<AlertDeliveryAttempt> findByAlertIdOrderByAttemptNumberAsc(UUID alertId);
+    }
+- type: prose
+  content: '**RabbitConfig** khai lại chính exchange `market-pulse.alerts` mà rule-engine đã khai ở Chặng 5 — an toàn vì khai với cùng thuộc tính (direct, durable) là *idempotent*; RabbitMQ không phàn nàn khi hai service cùng khai một exchange giống hệt nhau. Mục đích thật sự ở đây là mở **queue riêng** `alert-delivery.alerts` và buộc (bind) nó vào exchange đó — để alert-delivery nhận được bản sao của mọi alert mà không ảnh hưởng tới queue của service khác.'
+- type: code
+  filename: alert-delivery/src/main/java/com/marketpulse/alertdelivery/config/RabbitConfig.java
+  lang: java
+  content: |
+    package com.marketpulse.alertdelivery.config;
+
+    import org.springframework.amqp.core.*;
+    import org.springframework.amqp.support.converter.DefaultJackson2JavaTypeMapper;
+    import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+    import org.springframework.context.annotation.Bean;
+    import org.springframework.context.annotation.Configuration;
+
+    @Configuration
+    public class RabbitConfig {
+
+        // exchange này do rule-engine khai báo trước (Chặng 5); khai lại ở đây là idempotent
+        // vì cùng thuộc tính (direct, durable, không auto-delete) — chỉ để mở queue riêng.
+        public static final String ALERTS_EXCHANGE = "market-pulse.alerts";
+        public static final String ALERTS_QUEUE = "alert-delivery.alerts";
+        public static final String ALERTS_ROUTING_KEY = "alert";
+
+        @Bean
+        public DirectExchange alertsExchange() {
+            return new DirectExchange(ALERTS_EXCHANGE, true, false);
+        }
+
+        @Bean
+        public Queue alertsQueue() {
+            return new Queue(ALERTS_QUEUE, true);
+        }
+
+        @Bean
+        public Binding alertsBinding(Queue alertsQueue, DirectExchange alertsExchange) {
+            return BindingBuilder.bind(alertsQueue).to(alertsExchange).with(ALERTS_ROUTING_KEY);
+        }
+
+        @Bean
+        public Jackson2JsonMessageConverter jackson2JsonMessageConverter() {
+            DefaultJackson2JavaTypeMapper typeMapper = new DefaultJackson2JavaTypeMapper();
+            typeMapper.setTrustedPackages("com.marketpulse.*");
+            Jackson2JsonMessageConverter converter = new Jackson2JsonMessageConverter();
+            converter.setClassMapper(typeMapper);
+            return converter;
+        }
+    }
+- type: callout
+  variant: info
+  content: '`trustedPackages("com.marketpulse.*")` bắt buộc phải có: `AlertTriggeredEvent` là một Java record định nghĩa trong module `common`, và Jackson cần biết deserialize JSON nhận từ queue thành đúng class nào — nếu không khai, mặc định Spring sẽ TỪ CHỐI deserialize (chống tấn công deserialization), y hệt bẫy đã gặp ở CandleFlusher Chặng 4.'
+- type: command
+  label: Lưu mốc bước 6.2
+  content: |
+    git add alert-delivery
+    git commit -m "[step-6.2] alert-delivery: Alert + AlertDeliveryAttempt entity, repository, RabbitConfig (consume market-pulse.alerts)"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-6.2)
+  url: https://github.com/KouTaru99/market-pulse/commit/1043265
