@@ -1,0 +1,99 @@
+id: qs-01
+title: 'Chuẩn bị: ghi dữ liệu Binance thật + viết script load-test'
+order: 1
+est_minutes: 25
+commit_ref: 325ce4c
+goal: Ghi lại một đoạn dữ liệu Binance thật bằng FEED_MODE=record, và viết script tự động replay ở multiplier bất kỳ, theo dõi queue depth so với ngưỡng đã chốt từ pha kiến trúc.
+deliverable: scripts/load-test.sh (replay + poll queue depth mỗi 5s, so ngưỡng OQ5).
+outcome_preview: Sau bước này, có một tệp dữ liệu Binance thật để replay lặp lại nhiều lần, và một script tự động biết khi nào nên gọi là 'gãy'.
+blocks:
+- type: prose
+  content: 'Chặng 9 vẫn ở **Phần D**, nhưng đổi vai trò: không viết thêm tính năng, mà **đặt câu hỏi** — hệ đã xây từ Chặng 1-8 chịu được tải tới đâu? Ngưỡng "gãy" không phải đoán bừa lúc này, mà đã chốt từ pha kiến trúc (OQ5): queue `rule-engine.trades` vượt **5.000 message và còn tăng** là tiêu chí chính; ngoài ra còn latency alert p95 và tỉ lệ lỗi webhook.'
+- type: diagram
+  content: |
+    flowchart LR
+      BN[Binance WS that] -->|record 136s| ND[NDJSON 8606 trade]
+      ND -->|replay xN, giu nhip| RF[ReplayFeed]
+      RF --> Q[queue rule-engine.trades]
+      Q -->|do depth moi 5s| OBS[load-test.sh quan sat]
+- type: prose
+  content: Trước tiên cần dữ liệu THẬT để replay lặp lại nhiều lần — ghi ~136 giây trade BTCUSDT thật từ Binance (chế độ `record` đã xây từ Chặng 3), ra được 8.606 trade, tốc độ trung bình ~63 trade/giây.
+- type: command
+  label: Ghi dữ liệu thật để làm nguồn replay
+  content: |
+    FEED_MODE=record docker compose -f infra/docker-compose.yml up -d market-feed
+    sleep 136 && docker compose -f infra/docker-compose.yml stop market-feed
+    # => file trades-BTCUSDT-2026-07-08.ndjson trong volume market-feed-data, 8606 trade
+- type: prose
+  content: 'Script `load-test.sh` phát lại file đó ở một multiplier cho trước (dùng lại `FEED_MODE=replay` đã xây ở Chặng 3), rồi cứ mỗi 5 giây hỏi RabbitMQ Management API độ sâu của queue `rule-engine.trades` — dừng và báo GÃY ngay khi vượt ngưỡng 5.000:'
+- type: code
+  filename: scripts/load-test.sh
+  lang: bash
+  content: |
+    #!/usr/bin/env bash
+    # load-test.sh — Chặng 9: replay ở multiplier cho trước, theo dõi rule-engine.trades queue depth.
+    # Cách dùng: bash scripts/load-test.sh <multiplier> [thoi-gian-giay=60] [REPLAY_FILE]
+    # Yêu cầu: rabbitmq + market-feed + aggregation + rule-engine đang chạy; đã có file record
+    #          (FEED_MODE=record trước đó) trong volume market-feed-data — nếu không truyền tham số 3,
+    #          script tự lấy file .ndjson mới nhất trong volume.
+    # Tiêu chí "gãy" (OQ5, architecture.md §7.1): rule-engine.trades > 5,000 msg tại bất kỳ thời điểm nào.
+
+    set -uo pipefail
+
+    MULTIPLIER="${1:-3}"
+    DURATION="${2:-60}"
+    REPLAY_FILE_ARG="${3:-}"
+    COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.yml}"
+    RMQ_USER="${RABBITMQ_USER:-market_pulse}"
+    RMQ_PASS="${RABBITMQ_PASSWORD:-change_me}"
+    RMQ_API="http://localhost:15672/api"
+    QUEUE="rule-engine.trades"
+    BREAK_THRESHOLD=5000
+    INTERVAL=5
+
+    REPLAY_FILE="${REPLAY_FILE_ARG}"
+    if [ -z "${REPLAY_FILE}" ]; then
+        REPLAY_FILE=$(docker run --rm -v infra_market-feed-data:/data alpine sh -c "ls -t /data/*.ndjson 2>/dev/null | head -1")
+        if [ -z "${REPLAY_FILE}" ]; then
+            echo "FAIL Không tìm thấy file record nào trong volume market-feed-data."
+            echo "     Chạy trước: FEED_MODE=record docker compose -f ${COMPOSE_FILE} up -d market-feed"
+            exit 1
+        fi
+    fi
+
+    echo "=== Load-test: replay x${MULTIPLIER}, theo dõi ${DURATION}s, ngưỡng gãy = ${BREAK_THRESHOLD} msg (OQ5) ==="
+    echo "File nguồn: ${REPLAY_FILE}"
+    echo ""
+
+    FEED_MODE=replay REPLAY_FILE="${REPLAY_FILE}" REPLAY_MULTIPLIER="${MULTIPLIER}" REPLAY_LOOP=true \
+        docker compose -f "${COMPOSE_FILE}" up -d --force-recreate market-feed >/dev/null 2>&1
+
+    max_depth=0
+    broken=false
+    iterations=$((DURATION / INTERVAL))
+    for i in $(seq 1 "${iterations}"); do
+        sleep "${INTERVAL}"
+        depth=$(curl -s -u "${RMQ_USER}:${RMQ_PASS}" "${RMQ_API}/queues/%2F/${QUEUE}" | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('messages',0))" 2>/dev/null || echo 0)
+        echo "t=$((i * INTERVAL))s  ${QUEUE} depth=${depth}"
+        if [ "${depth}" -gt "${max_depth}" ] 2>/dev/null; then max_depth=${depth}; fi
+        if [ "${depth}" -gt "${BREAK_THRESHOLD}" ] 2>/dev/null; then broken=true; fi
+    done
+
+    echo ""
+    echo "=== Kết quả: multiplier=x${MULTIPLIER}  max_depth_quan_sát=${max_depth} ==="
+    if [ "${broken}" = true ]; then
+        echo "GÃY — depth vượt ${BREAK_THRESHOLD} msg (tiêu chí OQ5 chính)."
+        exit 1
+    else
+        echo "PASS — depth không vượt ${BREAK_THRESHOLD} msg trong ${DURATION}s quan sát."
+        exit 0
+    fi
+- type: callout
+  variant: info
+  content: Script tự tìm file `.ndjson` mới nhất trong volume nếu không truyền đường dẫn — tiện cho việc chạy lại nhiều lần ở nhiều multiplier khác nhau mà không phải ghi nhớ tên file.
+- type: command
+  label: Lưu mốc chuẩn bị load-test
+  content: |
+    git add scripts/load-test.sh
+    git commit -m "Chặng 9: chuẩn bị dữ liệu Binance thật + script load-test.sh"

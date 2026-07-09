@@ -1,0 +1,29 @@
+id: qs-03
+title: 'Round 2 — nhiều rule + mất kết nối consumer: cách duy nhất tạo backlog thật'
+order: 3
+est_minutes: 25
+commit_ref: 325ce4c
+goal: 'Thử kịch bản thực tế hơn: 301 rule đồng thời (nhiều tenant), rồi cố tình dừng rule-engine để tạo backlog — cách DUY NHẤT vượt ngưỡng 5.000 trong mọi thử nghiệm.'
+deliverable: Bảng kết quả kịch bản downtime, trước và sau khi áp fix.
+outcome_preview: Sau bước này, bạn biết chính xác kịch bản nào thật sự đe doạ hệ ở quy mô này — và nó không phải kịch bản ai cũng nghĩ tới đầu tiên.
+blocks:
+- type: prose
+  content: Một nền tảng B2B thật có **nhiều tenant × nhiều rule**, không phải 1 rule chạy đơn lẻ. Bơm thẳng 300 rule `PRICE_THRESHOLD` (tổng 301 rule ACTIVE cùng theo dõi BTCUSDT) để nhân chi phí đánh giá mỗi trade lên ×301, rồi replay lại ở mức thực tế ×10.
+- type: prose
+  content: '**Steady-state** (feed và rule-engine cùng chạy liên tục): depth dao động 0-59, không tăng liên tục — vẫn PASS xa ngưỡng.'
+- type: prose
+  content: 'Vậy điều gì THẬT SỰ tạo ra backlog? Thử kịch bản rule-engine bị dừng 20 giây trong khi feed vẫn publish đều — đây hoá ra là cách DUY NHẤT trong mọi thử nghiệm vượt ngưỡng 5.000:'
+- type: code
+  filename: Round 2 - kich ban consumer downtime
+  lang: text
+  content: |
+    Vòng | Cấu hình rule-engine                 | Thời gian down | Backlog dồn được | Thời gian rút cạn sau khi bật lại
+    -----|---------------------------------------|----------------|--------------------|--------------------------------------
+    1    | concurrency=1 (mặc định, CHƯA fix)     | 20s            | 7.292 msg          | < vài giây (lúc JVM khởi động ~4.4s)
+    2    | concurrency=5 + G1GC (ĐÃ fix)          | 20s            | 9.717 msg          | < vài giây (tương đương)
+- type: callout
+  variant: warning
+  content: Cả hai vòng (trước và sau khi tăng `concurrency` 1→5 + bật G1GC) đều rút cạn backlog GẦN NHƯ NGAY LẬP TỨC sau khi rule-engine khởi động lại — **không đo được khác biệt rõ rệt trước/sau fix** ở quy mô test được. `message_stats.ack` trên queue xác nhận hàng triệu message đã qua tay rule-engine trong suốt phiên test mà JVM không hề chậm lại — chi phí xử lý mỗi message quá rẻ so với năng lực CPU một máy local.
+- type: callout
+  variant: info
+  content: 'Bài học vận hành quan trọng nhất của cả Chặng 9: **rủi ro downtime-lúc-deploy đáng lo hơn rủi ro throughput** ở quy mô này. Không phải "hệ có xử lý kịp tải không" — mà là "khi rule-engine phải restart (deploy bản mới, crash, v.v.), backlog dồn lại trong lúc đó lớn tới đâu, và có rút cạn nổi không khi quay lại".'

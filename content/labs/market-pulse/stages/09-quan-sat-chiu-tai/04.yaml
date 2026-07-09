@@ -1,0 +1,134 @@
+id: qs-04
+title: 'Milestone Chặng 9: áp fix phòng xa + viết báo cáo trung thực'
+order: 4
+est_minutes: 20
+commit_ref: 325ce4c
+goal: Vẫn áp dụng fix concurrency+G1GC như thực hành phòng xa (dù không đo được cải thiện cụ thể ở quy mô test), và viết lại toàn bộ hành trình đo đạc một cách trung thực.
+deliverable: 'rule-engine: concurrency 1→5 + G1GC + docs/load-test-report.md (báo cáo đầy đủ).'
+outcome_preview: Sau bước này, Chặng 9 khép lại với một quyết định kỹ thuật CÓ LÝ DO rõ ràng, và một tài liệu không che giấu chỗ thực tế khác kế hoạch.
+blocks:
+- type: prose
+  content: 'Dù không đo được khác biệt cụ thể ở quy mô test local, fix vẫn được áp — vì đây là **thực hành phòng xa hợp lý** (nhiều tenant/rule hơn ở scale thật ngoài tầm test 1 máy, hoặc logic đánh giá rule nặng hơn trong tương lai), chi phí gần như bằng 0, và không có tác dụng phụ nào đo được:'
+- type: code
+  filename: rule-engine/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8083
+
+    spring:
+      application:
+        name: rule-engine
+      rabbitmq:
+        host: ${SPRING_RABBITMQ_HOST:localhost}
+        port: ${SPRING_RABBITMQ_PORT:5672}
+        username: ${SPRING_RABBITMQ_USERNAME:guest}
+        password: ${SPRING_RABBITMQ_PASSWORD:guest}
+        listener:
+          simple:
+            # Chặng 9 load-test: đo tại quy mô test được (1 máy, 301 rule, replay x10) tiêu thụ
+            # đơn luồng vẫn rút cạn backlog gần như tức thì — không thấy nghẽn thật để so sánh
+            # trước/sau. Vẫn tăng lên 5 làm best-practice phòng xa (nhiều tenant/rule hơn ở scale
+            # thật), không phải vì đã đo được cải thiện cụ thể. Xem docs/load-test-report.md.
+            concurrency: ${RABBITMQ_LISTENER_CONCURRENCY:5}
+      datasource:
+        url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5434/rule_engine}
+        username: ${SPRING_DATASOURCE_USERNAME:rule_engine_user}
+        password: ${SPRING_DATASOURCE_PASSWORD:change_me}
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        open-in-view: false
+      flyway:
+        enabled: true
+      jackson:
+        serialization:
+          write-dates-as-timestamps: false
+
+    billing:
+      service:
+        url: ${BILLING_SERVICE_URL:http://localhost:8085}
+
+    rule-engine:
+      alert:
+        cooldown-ms: ${ALERT_COOLDOWN_MS:60000}
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+- type: code
+  filename: rule-engine/Dockerfile
+  lang: dockerfile
+  content: |
+    # Stage 1: Build
+    FROM eclipse-temurin:21-jdk AS builder
+    WORKDIR /workspace
+
+    # Gradle wrapper
+    COPY gradlew ./
+    COPY gradle gradle/
+
+    # Root build config
+    COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+
+    # Build files của mọi subproject (cần để Gradle evaluate settings.gradle.kts)
+    COPY common/build.gradle.kts       common/build.gradle.kts
+    COPY gateway/build.gradle.kts      gateway/build.gradle.kts
+    COPY identity/build.gradle.kts     identity/build.gradle.kts
+    COPY market-feed/build.gradle.kts  market-feed/build.gradle.kts
+    COPY aggregation/build.gradle.kts  aggregation/build.gradle.kts
+    COPY rule-engine/build.gradle.kts  rule-engine/build.gradle.kts
+    COPY alert-delivery/build.gradle.kts alert-delivery/build.gradle.kts
+    COPY billing/build.gradle.kts      billing/build.gradle.kts
+
+    # Source code: chỉ common (dependency của rule-engine) và rule-engine
+    COPY common/src      common/src
+    COPY rule-engine/src rule-engine/src
+
+    RUN --mount=type=cache,target=/root/.gradle chmod +x gradlew && ./gradlew :rule-engine:bootJar --no-daemon -x test
+
+    # Stage 2: Runtime
+    FROM eclipse-temurin:21-jre-alpine
+    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+    WORKDIR /app
+    COPY --from=builder /workspace/rule-engine/build/libs/rule-engine.jar app.jar
+    USER appuser
+    EXPOSE 8083
+    ENTRYPOINT ["java", "-Xmx256m", "-XX:+UseG1GC", "-XX:MaxGCPauseMillis=100", "-jar", "app.jar"]
+- type: prose
+  content: 'Và quan trọng không kém việc fix: viết lại toàn bộ hành trình đo đạc thành một báo cáo — không nắn số liệu cho khớp kế hoạch ban đầu, chỉ ghi lại đúng những gì quan sát được:'
+- type: code
+  filename: docs/load-test-report.md — mục 6 Kết luận trung thực
+  lang: markdown
+  content: |
+    1. Kế hoạch ban đầu ("×10 BROKEN") KHÔNG khớp thực tế đo được — với thiết kế hiện tại
+       (evaluator đơn giản, 1 rule), hệ bền hơn nhiều so với giả định lúc lập kế hoạch.
+    2. Cách DUY NHẤT tạo backlog thật vượt 5.000 msg là consumer downtime (rule-engine dừng/
+       restart trong khi feed vẫn publish) — không phải throughput ổn định không theo kịp.
+    3. Ngay cả backlog downtime cũng rút cạn gần như tức thì khi consumer quay lại — vì chi phí
+       xử lý mỗi message quá rẻ so với năng lực phần cứng test được.
+    4. Fix concurrency+G1GC vẫn được giữ như thực hành tốt phòng xa, không phải vì đã chứng minh
+       được cải thiện đo lường cụ thể ở đây.
+    5. Bài học phương pháp: giới hạn thật gặp phải ở tải cực cao (×500+) đến từ chi phí I/O của
+       chính cơ chế replay (mở lại file liên tục), không phải từ hệ thống đang test — nhắc nhở
+       luôn phân biệt "giới hạn của công cụ đo" và "giới hạn của hệ thống được đo".
+- type: callout
+  variant: tip
+  content: 'Đây là điểm khác biệt giữa một báo cáo kỹ thuật CÓ GIÁ TRỊ và một báo cáo chỉ để "cho xong việc": báo cáo tốt ghi lại cả những chỗ thực tế PHỦ ĐỊNH giả định ban đầu, kèm LÝ DO vì sao (giới hạn công cụ đo, chi phí xử lý rẻ hơn dự kiến) — thay vì lặng lẽ sửa số cho khớp kịch bản đã viết sẵn trong tài liệu kiến trúc.'
+- type: command
+  label: Lưu mốc bước cuối Chặng 9 — milestone
+  content: |
+    git add rule-engine docs/load-test-report.md
+    git commit -m "Chặng 9 — Quan sát & chịu tải: load-test thật bằng dữ liệu Binance thật + fix concurrency/GC"
+- type: callout
+  variant: info
+  content: 'Milestone Chặng 9 đạt: hệ đã được đo dưới tải thật, không phải chỉ chạy thử cho có. Phát hiện quan trọng nhất không phải một con số, mà là một THAY ĐỔI GÓC NHÌN — từ lo throughput sang lo vận hành lúc downtime. Chặng 10, chặng cuối cùng của Lab, đóng gói toàn bộ 7 service để chạy cùng lúc lần đầu tiên.'
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (Chặng 9)
+  url: https://github.com/KouTaru99/market-pulse/commit/325ce4c
