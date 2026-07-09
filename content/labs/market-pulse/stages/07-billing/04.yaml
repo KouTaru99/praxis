@@ -1,0 +1,183 @@
+id: bi-04
+title: 'billing: TenantPlanClient (cache) + upsert đếm nguyên tử'
+order: 4
+est_minutes: 35
+commit_ref: 0ed44d1
+goal: Viết TenantPlanClient gọi identity với cache Caffeine 60s và fail-open, cùng phép tăng đếm nguyên tử chống race condition.
+deliverable: TenantPlanClient + TenantPlan + UsagePeriod entity + UsagePeriodRepository (INSERT..ON CONFLICT).
+outcome_preview: Sau bước này, billing biết tra cứu hạn mức gói (có cache, không tra identity mỗi request) và tăng đếm lượng dùng một cách an toàn dù nhiều alert tới cùng lúc.
+blocks:
+- type: prose
+  content: '`TenantPlanClient` gọi sang identity để lấy `maxRules`/`maxAlertsPm` — cùng khuôn Caffeine cache đã dùng ở `ApiKeyAuthFilter` (Chặng 2), chỉ khác TTL: 60 giây thay vì 5, vì gói cước gần như không bao giờ đổi giữa chừng, không cần tra lại liên tục:'
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/client/TenantPlanClient.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.client;
+
+    import com.github.benmanes.caffeine.cache.Cache;
+    import com.github.benmanes.caffeine.cache.Caffeine;
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.beans.factory.annotation.Value;
+    import org.springframework.stereotype.Component;
+    import org.springframework.web.reactive.function.client.WebClient;
+
+    import java.time.Duration;
+    import java.util.Optional;
+    import java.util.UUID;
+    import java.util.concurrent.TimeUnit;
+
+    /**
+     * Resolve giới hạn gói (maxRules/maxAlertsPm) của tenant qua identity — billing không có DB
+     * riêng cho plan (db-per-service: identity là chủ sở hữu duy nhất của tenant+plan).
+     * Cache 60s (Caffeine, giống ApiKeyAuthFilter): plan hiếm khi đổi, không cần tra mỗi request.
+     */
+    @Component
+    public class TenantPlanClient {
+
+        private static final Logger log = LoggerFactory.getLogger(TenantPlanClient.class);
+
+        private final WebClient webClient;
+        private final Cache<UUID, TenantPlan> cache;
+
+        public TenantPlanClient(WebClient.Builder builder, @Value("${identity.service.url}") String baseUrl) {
+            this.webClient = builder.baseUrl(baseUrl).build();
+            this.cache = Caffeine.newBuilder()
+                    .expireAfterWrite(60, TimeUnit.SECONDS)
+                    .maximumSize(10_000)
+                    .build();
+        }
+
+        /** Empty nếu identity không phản hồi hoặc tenant không tồn tại — caller tự quyết fail-open. */
+        public Optional<TenantPlan> get(UUID tenantId) {
+            TenantPlan cached = cache.getIfPresent(tenantId);
+            if (cached != null) {
+                return Optional.of(cached);
+            }
+            try {
+                InternalTenantResponse resp = webClient.get()
+                        .uri("/internal/tenants/{tenantId}", tenantId)
+                        .retrieve()
+                        .bodyToMono(InternalTenantResponse.class)
+                        .timeout(Duration.ofSeconds(2))
+                        .block();
+                TenantPlan plan = new TenantPlan(resp.maxRules(), resp.maxAlertsPm());
+                cache.put(tenantId, plan);
+                return Optional.of(plan);
+            } catch (Exception e) {
+                log.warn("identity unavailable, không resolve được plan cho tenant {}: {}", tenantId, e.getMessage());
+                return Optional.empty();
+            }
+        }
+    }
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/client/TenantPlan.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.client;
+
+    public record TenantPlan(int maxRules, int maxAlertsPm) {}
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/client/InternalTenantResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.client;
+
+    import java.util.UUID;
+
+    /** Khớp identity.dto.InternalTenantResponse — chỉ khai lại phía client, không share module DTO. */
+    public record InternalTenantResponse(
+            UUID tenantId, UUID planId, String planName,
+            int maxRules, int maxAlertsPm, String status
+    ) {}
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/domain/UsagePeriod.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.domain;
+
+    import jakarta.persistence.*;
+    import org.hibernate.annotations.UpdateTimestamp;
+
+    import java.time.OffsetDateTime;
+    import java.util.UUID;
+
+    @Entity
+    @Table(name = "usage_periods")
+    public class UsagePeriod {
+
+        @Id
+        @GeneratedValue(strategy = GenerationType.UUID)
+        private UUID id;
+
+        @Column(name = "tenant_id", nullable = false)
+        private UUID tenantId;
+
+        @Column(nullable = false, length = 7)
+        private String period;
+
+        @Column(name = "alerts_fired", nullable = false)
+        private int alertsFired;
+
+        @UpdateTimestamp
+        @Column(name = "updated_at", nullable = false)
+        private OffsetDateTime updatedAt;
+
+        protected UsagePeriod() {}
+
+        public UUID getId() { return id; }
+        public UUID getTenantId() { return tenantId; }
+        public String getPeriod() { return period; }
+        public int getAlertsFired() { return alertsFired; }
+        public OffsetDateTime getUpdatedAt() { return updatedAt; }
+    }
+- type: prose
+  content: 'Điểm kỹ thuật đáng chú ý nhất bước này nằm ở câu lệnh tăng đếm:'
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/repository/UsagePeriodRepository.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.repository;
+
+    import com.marketpulse.billing.domain.UsagePeriod;
+    import org.springframework.data.jpa.repository.JpaRepository;
+    import org.springframework.data.jpa.repository.Modifying;
+    import org.springframework.data.jpa.repository.Query;
+    import org.springframework.data.repository.query.Param;
+    import org.springframework.transaction.annotation.Transactional;
+
+    import java.util.Optional;
+    import java.util.UUID;
+
+    public interface UsagePeriodRepository extends JpaRepository<UsagePeriod, UUID> {
+
+        Optional<UsagePeriod> findByTenantIdAndPeriod(UUID tenantId, String period);
+
+        /**
+         * INSERT..ON CONFLICT thay vì SELECT-rồi-UPDATE: tránh race khi 2 alert của cùng tenant
+         * đến gần như đồng thời — 2 request riêng biệt cùng "thấy" dòng chưa tồn tại rồi cùng INSERT
+         * sẽ vỡ unique constraint (tenant_id, period); upsert nguyên tử ở tầng DB loại bỏ khả năng đó.
+         */
+        @Transactional
+        @Modifying
+        @Query(value = """
+                INSERT INTO usage_periods (id, tenant_id, period, alerts_fired, updated_at)
+                VALUES (gen_random_uuid(), :tenantId, :period, 1, now())
+                ON CONFLICT (tenant_id, period)
+                DO UPDATE SET alerts_fired = usage_periods.alerts_fired + 1, updated_at = now()
+                """, nativeQuery = true)
+        void incrementAlertsFired(@Param("tenantId") UUID tenantId, @Param("period") String period);
+    }
+- type: callout
+  variant: warning
+  content: 'Vì sao không viết đơn giản "SELECT dòng hiện có, cộng 1, rồi UPDATE"? Vì hai alert của CÙNG một tenant có thể tới gần như đồng thời (hai luồng consumer khác nhau xử lý cùng lúc): cả hai cùng SELECT thấy chưa có dòng, cả hai cùng INSERT → vỡ ràng buộc unique `(tenant_id, period)`, hoặc tệ hơn là một bên ghi đè mất bản cộng của bên kia. `INSERT..ON CONFLICT..DO UPDATE` đẩy phép tăng đếm xuống tận **tầng database**, nơi PostgreSQL tự đảm bảo tính nguyên tử — loại bỏ hẳn khả năng đụng độ, không cần khoá tay ở tầng ứng dụng.'
+- type: command
+  label: Lưu mốc bước 7.4
+  content: |
+    git add billing
+    git commit -m "[step-7.4] billing: TenantPlanClient (cache Caffeine 60s, fail-open) + UsagePeriod entity + upsert nguyen tu"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-7.4)
+  url: https://github.com/KouTaru99/market-pulse/commit/0ed44d1

@@ -1,0 +1,104 @@
+id: bi-01
+title: 'identity: mở endpoint nội bộ cho billing tra cứu gói'
+order: 1
+est_minutes: 20
+commit_ref: a1d7828
+goal: Mở endpoint nội bộ GET /internal/tenants/{id} để billing tra giới hạn gói (maxRules/maxAlertsPm) của một tenant.
+deliverable: InternalTenantController + InternalTenantResponse + TenantNotFoundException + query JOIN FETCH plan.
+outcome_preview: Sau bước này, identity đã sẵn sàng cho billing hỏi — mảnh ghép đầu tiên trước khi billing (Chặng này) và rồi rule-engine (bước sau) có thể enforce hạn mức gói cước.
+blocks:
+- type: prose
+  content: 'Chặng 7 khép **Phần C**. rule-engine (Chặng 5) và alert-delivery (Chặng 6) đã hoạt động, nhưng chưa ai **đếm** và **giới hạn** theo gói cước tenant đang trả tiền. **billing** làm việc đó theo đúng tinh thần ADR-003 — hạn mức lai (hybrid): kiểm tra **đồng bộ** khi tạo rule (phải biết ngay có được tạo không), và đếm **bất đồng bộ** khi alert bắn ra (không cần biết ngay, cộng dồn theo tháng).'
+- type: diagram
+  content: |
+    sequenceDiagram
+      participant RE as rule-engine
+      participant ID as identity
+      participant BI as billing
+      participant EX as exchange market-pulse.quota
+      Note over RE,BI: (a) Rule quota - dong bo, luc tao rule moi
+      RE->>BI: GET /internal/quota/{tenantId}?activeRules=N
+      BI->>ID: GET /internal/tenants/{id} (cache Caffeine 60s)
+      ID-->>BI: maxRules, maxAlertsPm
+      BI-->>RE: rulesQuotaExceeded?
+      Note over BI,EX: (b) Alert quota - bat dong bo, moi lan alert ban ra
+      BI->>BI: consume AlertTriggeredEvent (queue rieng billing.alerts)
+      BI->>BI: upsert usage_periods (INSERT..ON CONFLICT)
+      alt vuot maxAlertsPm
+        BI->>EX: publish QuotaExceededEvent
+        EX->>RE: rule-engine tam dung danh gia (EVAL_PAUSED, Chang 5)
+      end
+- type: prose
+  content: 'Trước khi billing tồn tại, phải mở một cánh cửa ở identity: billing cần biết `maxRules`/`maxAlertsPm` của một tenant, nhưng theo nguyên tắc **db-per-service** (mỗi service chỉ có DB riêng, không ai được đọc thẳng DB người khác), chỉ identity có bảng `tenants`/`plans`. Endpoint nội bộ này lộ ra đúng thông tin billing cần, không hơn:'
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/controller/InternalTenantController.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.controller;
+
+    import com.marketpulse.identity.domain.Tenant;
+    import com.marketpulse.identity.dto.InternalTenantResponse;
+    import com.marketpulse.identity.exception.TenantNotFoundException;
+    import com.marketpulse.identity.repository.TenantRepository;
+    import org.springframework.web.bind.annotation.GetMapping;
+    import org.springframework.web.bind.annotation.PathVariable;
+    import org.springframework.web.bind.annotation.RestController;
+
+    import java.util.UUID;
+
+    @RestController
+    public class InternalTenantController {
+
+        private final TenantRepository tenantRepository;
+
+        public InternalTenantController(TenantRepository tenantRepository) {
+            this.tenantRepository = tenantRepository;
+        }
+
+        // Chỉ dùng nội bộ Docker network — billing gọi để resolve giới hạn gói (maxRules/maxAlertsPm)
+        @GetMapping("/internal/tenants/{tenantId}")
+        public InternalTenantResponse getById(@PathVariable UUID tenantId) {
+            Tenant tenant = tenantRepository.findByIdWithPlan(tenantId)
+                    .orElseThrow(() -> new TenantNotFoundException(tenantId));
+
+            return new InternalTenantResponse(
+                    tenant.getId(), tenant.getPlan().getId(), tenant.getPlan().getName(),
+                    tenant.getPlan().getMaxRules(), tenant.getPlan().getMaxAlertsPm(), tenant.getStatus()
+            );
+        }
+    }
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/dto/InternalTenantResponse.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.dto;
+
+    import java.util.UUID;
+
+    public record InternalTenantResponse(
+            UUID tenantId, UUID planId, String planName,
+            int maxRules, int maxAlertsPm, String status
+    ) {}
+- type: code
+  filename: identity/src/main/java/com/marketpulse/identity/exception/TenantNotFoundException.java
+  lang: java
+  content: |
+    package com.marketpulse.identity.exception;
+
+    public class TenantNotFoundException extends RuntimeException {
+        public TenantNotFoundException(Object identifier) {
+            super("Tenant not found: " + identifier);
+        }
+    }
+- type: callout
+  variant: info
+  content: Câu query `findByIdWithPlan` dùng `JOIN FETCH` để lấy `Tenant` kèm `Plan` trong một lần truy vấn duy nhất — cùng kỹ thuật, cùng lý do (tránh N+1 query) như `ApiKeyRepository.findActiveByKeyHash` ở Chặng 2. Một khi học một mẫu, mẫu đó lặp lại tự nhiên ở chỗ cần.
+- type: command
+  label: Lưu mốc bước 7.1
+  content: |
+    git add identity
+    git commit -m "[step-7.1] identity: GET /internal/tenants/{id} — tra planId+maxRules+maxAlertsPm, billing dung de resolve gioi han goi"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-7.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/a1d7828

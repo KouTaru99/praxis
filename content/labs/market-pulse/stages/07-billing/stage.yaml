@@ -1,0 +1,5 @@
+id: billing
+order: 7
+title: Đo lượng dùng & chặn vượt hạn mức
+description: 'Service billing đo lượng dùng theo gói cước của tenant: kiểm tra số rule (đồng bộ, lúc tạo rule) và đếm số alert mỗi tháng (bất đồng bộ, mỗi khi có alert bắn ra), chặn khi vượt hạn mức. Milestone: profile delivery đủ 3 service billing/alert-delivery/rule-engine chạy cùng.'
+part: C · Giao nhận & tính phí

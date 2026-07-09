@@ -1,0 +1,170 @@
+id: bi-08
+title: 'Milestone Chặng 7: smoke test 6 ca — khép Phần C'
+order: 8
+est_minutes: 35
+commit_ref: 8bc9274
+goal: 'Chạy smoke test tự động 6 ca chứng minh cả hai nhánh hạn mức: rule quota đồng bộ, alert quota bất đồng bộ, và regression rule-engine.'
+deliverable: scripts/smoke-ch7.sh (bind queue tạm để nghe QuotaExceededEvent, seed usage sát hạn mức, publish alert thật) + docs.
+outcome_preview: 'Milestone Chặng 7 đạt — và khép Phần C: rule-engine đánh giá, alert-delivery giao, billing tính phí, cả ba nói chuyện với nhau đúng thiết kế.'
+blocks:
+- type: prose
+  content: 'Script kiểm cả hai nhánh của ADR-003 bằng hai kỹ thuật khác nhau — đúng bản chất đồng bộ/bất đồng bộ của từng nhánh:'
+- type: prose
+  content: '**Nhánh đồng bộ (rule quota):** gọi thẳng `GET /internal/quota` với `activeRules` cao và thấp, so kết quả `rulesQuotaExceeded` — đơn giản vì đây là một request-response bình thường. Kèm một ca **regression**: tạo rule thật qua rule-engine để chắc chắn việc sửa `QuotaClient` (bước 7.2) không làm gãy đường tạo rule bình thường.'
+- type: prose
+  content: '**Nhánh bất đồng bộ (alert quota):** phức tạp hơn — phải **bind một queue tạm vào exchange quota TRƯỚC** (nghe trước, hành động sau, để không bỏ lỡ sự kiện), rồi seed lượng dùng sát hạn mức thẳng vào DB (999/1000) để không phải bắn 1000 alert thật mới test được ca vượt, cuối cùng publish 2 alert thật để đẩy qua hạn mức và xác nhận `QuotaExceededEvent` xuất hiện đúng schema.'
+- type: code
+  filename: scripts/smoke-ch7.sh
+  lang: bash
+  content: |
+    #!/usr/bin/env bash
+    # smoke-ch7.sh — Milestone Chặng 7: billing — rule quota (sync) + alert quota (event-driven).
+    # Yêu cầu: rabbitmq + identity + rule-engine + billing (+ 3 DB) đang chạy.
+    #   docker compose ... up -d identity rule-engine billing identity-db rule-engine-db billing-db
+    # Cách chạy: bash scripts/smoke-ch7.sh
+    # Biến: BILLING_URL (mặc định http://localhost:8085), RULE_ENGINE_URL, TENANT_ID (demo Acme, plan starter: maxRules=5, maxAlertsPm=1000).
+
+    set -uo pipefail
+
+    COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.yml}"
+    BILLING_URL="${BILLING_URL:-http://localhost:8085}"
+    RE_URL="${RULE_ENGINE_URL:-http://localhost:8083}"
+    TENANT_ID="${TENANT_ID:-00000000-0000-0000-0001-000000000001}"
+    RMQ_USER="${RABBITMQ_USER:-market_pulse}"
+    RMQ_PASS="${RABBITMQ_PASSWORD:-change_me}"
+    RMQ_API="http://localhost:15672/api"
+    QUOTA_EXCHANGE="market-pulse.quota"
+    ALERTS_EXCHANGE="market-pulse.alerts"
+    VQUEUE="smoke-ch7-quota"
+    BILLING_DB_USER="${BILLING_DB_USER:-billing_user}"
+    PASS=0
+    FAIL=0
+
+    check() {
+        local label="$1" got="$2" want="$3"
+        if [ "$got" = "$want" ]; then echo "PASS  ${label}"; PASS=$((PASS + 1))
+        else echo "FAIL  ${label}  (got=${got}, want=${want})"; FAIL=$((FAIL + 1)); fi
+    }
+
+    echo "=== Smoke test Chặng 7 — billing: rule quota (sync) + alert quota (event-driven) ==="
+    echo ""
+
+    # ── TC1: billing container healthy ─────────────────────────────────────────
+    BILLING_CID=$(docker compose -f "${COMPOSE_FILE}" ps -q billing 2>/dev/null)
+    health=$(docker inspect -f '{{.State.Health.Status}}' "${BILLING_CID}" 2>/dev/null || echo "missing")
+    check "TC1  billing container healthy            → healthy" "$health" "healthy"
+
+    # ── TC2-3: rule quota — GET /internal/quota (activeRules cao/thấp so với plan starter maxRules=5) ──
+    over=$(curl -s "${BILLING_URL}/internal/quota/${TENANT_ID}?activeRules=5" | \
+        python3 -c "import sys,json; print(json.load(sys.stdin).get('rulesQuotaExceeded'))" 2>/dev/null || echo "err")
+    check "TC2  activeRules=5 (bằng limit) → rulesQuotaExceeded=True" "$over" "True"
+
+    under=$(curl -s "${BILLING_URL}/internal/quota/${TENANT_ID}?activeRules=0" | \
+        python3 -c "import sys,json; print(json.load(sys.stdin).get('rulesQuotaExceeded'))" 2>/dev/null || echo "err")
+    check "TC3  activeRules=0 (dưới limit) → rulesQuotaExceeded=False" "$under" "False"
+
+    # ── TC4: regression rule-engine — tạo rule thật vẫn hoạt động bình thường sau khi sửa QuotaClient ──
+    create=$(curl -s -X POST "${RE_URL}/api/v1/rules" \
+        -H "X-Tenant-Id: ${TENANT_ID}" -H "Content-Type: application/json" \
+        -d '{"symbol":"SMOKECH7","type":"PRICE_THRESHOLD","params":{"threshold":"1","direction":"ABOVE"},"webhookUrl":"https://example.com/hook"}')
+    status=$(printf '%s' "$create" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
+    check "TC4  regression: rule-engine vẫn tạo rule OK sau khi sửa QuotaClient → ACTIVE" "$status" "ACTIVE"
+    rule_id=$(printf '%s' "$create" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+    [ -n "${rule_id}" ] && curl -s -X DELETE "${RE_URL}/api/v1/rules/${rule_id}" -H "X-Tenant-Id: ${TENANT_ID}" >/dev/null 2>&1
+
+    # ── Bind queue tạm vào exchange quota TRƯỚC khi seed+publish (nghe trước, hành động sau) ──
+    curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X PUT "${RMQ_API}/queues/%2F/${VQUEUE}" \
+        -H "content-type: application/json" -d '{"durable":false}' >/dev/null 2>&1
+    curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/bindings/%2F/e/${QUOTA_EXCHANGE}/q/${VQUEUE}" \
+        -H "content-type: application/json" -d '{"routing_key":"quota.exceeded"}' >/dev/null 2>&1
+
+    # ── TC5-6: alert quota — seed usage sát limit (999/1000), publish 2 alert thật → vượt → QuotaExceededEvent ──
+    PERIOD=$(date +%Y-%m)
+    docker compose -f "${COMPOSE_FILE}" exec -T billing-db psql -U "${BILLING_DB_USER}" -d billing -v ON_ERROR_STOP=1 -c "
+    INSERT INTO usage_periods (id, tenant_id, period, alerts_fired, updated_at)
+    VALUES (gen_random_uuid(), '${TENANT_ID}', '${PERIOD}', 999, now())
+    ON CONFLICT (tenant_id, period) DO UPDATE SET alerts_fired = 999, updated_at = now();
+    " >/dev/null 2>&1
+
+    publish_alert() {
+        local alert_id payload
+        alert_id=$(python3 -c "import uuid; print(uuid.uuid4())")
+        payload=$(python3 -c "
+    import json
+    event = {
+        'alertId': '${alert_id}', 'ruleId': '11111111-1111-1111-1111-111111111111',
+        'tenantId': '${TENANT_ID}', 'symbol': 'BTCUSDT', 'ruleType': 'PRICE_THRESHOLD',
+        'triggeredAt': '2026-07-08T00:00:00Z', 'triggerValue': '1.00',
+        'webhookUrl': 'http://host.docker.internal:9/dev/null'
+    }
+    msg = {'properties': {'content_type':'application/json','headers':{'__TypeId__':'com.marketpulse.common.event.AlertTriggeredEvent'}},
+           'routing_key':'alert','payload': json.dumps(event),'payload_encoding':'string'}
+    print(json.dumps(msg))
+    ")
+        curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/exchanges/%2F/${ALERTS_EXCHANGE}/publish" \
+            -H "content-type: application/json" -d "${payload}" >/dev/null 2>&1
+    }
+
+    # alert #1000 (chạm limit, chưa vượt) rồi #1001 (vượt) — billing consume độc lập qua queue riêng (billing.alerts)
+    publish_alert
+    sleep 1
+    publish_alert
+
+    echo "      [chờ tối đa ~10s cho billing consume + publish QuotaExceededEvent...]"
+    get_json="[]"
+    n=0
+    while [ "$n" -lt 5 ]; do
+        sleep 2; n=$((n + 1))
+        get_json=$(curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X POST "${RMQ_API}/queues/%2F/${VQUEUE}/get" \
+            -H "content-type: application/json" -d '{"count":5,"ackmode":"ack_requeue_true","encoding":"auto"}')
+        cnt=$(printf '%s' "$get_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+        if [ "${cnt:-0}" -gt 0 ] 2>/dev/null; then break; fi
+    done
+    schema_ok=$(printf '%s' "$get_json" | python3 -c "
+    import sys,json
+    d=json.load(sys.stdin)
+    if not d: print('no-event'); exit()
+    p=json.loads(d[0]['payload'])
+    ok = p.get('quotaType')=='ALERTS' and p.get('tenantId')=='${TENANT_ID}' and p.get('currentCount',0) > p.get('limit',0)
+    print('ok' if ok else 'bad:'+str(p))
+    " 2>/dev/null || echo "bad")
+    check "TC5  vượt alert quota (999→1000→1001>limit) → QuotaExceededEvent đúng schema [+$((n*2))s]" "$schema_ok" "ok"
+
+    # ── TC6: GET /api/v1/usage phản ánh đúng đếm mới (>= 1001, vì 999 seed + 2 alert vừa publish) ──
+    usage_ok=$(curl -s "${BILLING_URL}/api/v1/usage" -H "X-Tenant-Id: ${TENANT_ID}" | \
+        python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('alertsFired',0) >= 1001 else 'bad:'+str(d))" 2>/dev/null || echo "bad")
+    check "TC6  GET /api/v1/usage phản ánh đếm mới (>=1001)   → ok" "$usage_ok" "ok"
+
+    # ── dọn: xoá queue tạm ──────────────────────────────────────────────────────
+    curl -s -u "${RMQ_USER}:${RMQ_PASS}" -X DELETE "${RMQ_API}/queues/%2F/${VQUEUE}" >/dev/null 2>&1
+
+    echo ""
+    echo "=== Kết quả: PASS=${PASS}  FAIL=${FAIL} ==="
+    if [ "${FAIL}" -eq 0 ]; then
+        echo "PASS  Chặng 7 milestone — billing enforce đúng quota rule (sync) + alert (event-driven)"
+        exit 0
+    else
+        echo "FAIL  Chặng 7 — kiểm tra: docker compose -f ${COMPOSE_FILE} logs billing rule-engine identity"
+        exit 1
+    fi
+- type: command
+  label: Chạy smoke test Chặng 7
+  content: |
+    bash scripts/smoke-ch7.sh
+    # PASS  TC1  billing container healthy
+    # PASS  TC2  activeRules=5 (bang limit) -> rulesQuotaExceeded=True
+    # PASS  TC3  activeRules=0 (duoi limit) -> rulesQuotaExceeded=False
+    # PASS  TC4  regression: rule-engine van tao rule OK
+    # PASS  TC5  vuot alert quota (999->1000->1001>limit) -> QuotaExceededEvent dung schema
+    # PASS  TC6  GET /api/v1/usage phan anh dem moi (>=1001)
+    # === Ket qua: PASS=6  FAIL=0 ===
+- type: callout
+  variant: tip
+  content: 'Ca TC5 là ca công phu nhất trong toàn bộ Chặng: nó không kiểm tra một API trả lời đúng, mà kiểm tra một **hệ quả lan truyền qua 2 lớp bất đồng bộ** — publish alert thật → billing tự consume và tăng đếm → billing tự phát hiện vượt và publish quota event — tất cả không có một request-response nào để đợi trực tiếp, chỉ có thể poll một queue tạm cho tới khi thấy kết quả.'
+- type: callout
+  variant: info
+  content: 'Milestone Chặng 7 đạt, và **Phần C khép lại**: rule-engine (Chặng 5) đánh giá điều kiện, alert-delivery (Chặng 6) giao webhook có thử lại, billing (Chặng 7) đo lượng dùng và chặn vượt hạn mức — ba service nói cùng một ngôn ngữ sự kiện qua RabbitMQ mà không ai cần biết chi tiết nội bộ của ai. Chặng 8 mở Phần D — dashboard, nơi lần đầu tiên có một giao diện để NHÌN THẤY toàn bộ luồng này thay vì chỉ gọi API.'
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-7.8)
+  url: https://github.com/KouTaru99/market-pulse/commit/8bc9274

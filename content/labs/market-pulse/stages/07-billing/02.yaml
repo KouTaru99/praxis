@@ -1,0 +1,73 @@
+id: bi-02
+title: 'rule-engine: sửa QuotaClient để tự truyền activeRules'
+order: 2
+est_minutes: 25
+commit_ref: 84366fe
+goal: 'Phát hiện một hệ quả của db-per-service: billing không thể tự đếm số rule đang hoạt động của tenant — sửa QuotaClient để rule-engine tự đếm rồi truyền số đó qua.'
+deliverable: QuotaClient.check() thêm tham số activeRules + fix một bug test có sẵn phát hiện khi chạy lại toàn bộ test suite.
+outcome_preview: 'Sau bước này, hợp đồng giữa rule-engine và billing đã đúng: ai sở hữu dữ liệu thì người đó đếm, billing chỉ so sánh với hạn mức.'
+blocks:
+- type: callout
+  variant: warning
+  content: 'Đây là một **phát hiện kiến trúc thật giữa chừng implement**, không phải kế hoạch từ đầu: thiết kế ban đầu ngầm giả định billing có thể tự trả lời "tenant này có vượt hạn mức rule không" — nhưng billing KHÔNG sở hữu bảng `rules` (đó là của rule-engine, đúng nguyên tắc db-per-service), nên nó không có cách nào tự đếm. Cách sửa đúng tinh thần kiến trúc: bên SỞ HỮU dữ liệu (rule-engine) tự đếm, rồi truyền số đó qua tham số khi hỏi billing — billing chỉ làm đúng việc của nó là so sánh với hạn mức gói.'
+- type: code
+  filename: rule-engine/src/main/java/com/marketpulse/ruleengine/client/QuotaClient.java
+  lang: java
+  content: |
+    package com.marketpulse.ruleengine.client;
+
+    import org.springframework.beans.factory.annotation.Value;
+    import org.springframework.stereotype.Component;
+    import org.springframework.web.reactive.function.client.WebClient;
+
+    import java.time.Duration;
+    import java.util.Optional;
+    import java.util.UUID;
+
+    @Component
+    public class QuotaClient {
+
+        private final WebClient webClient;
+
+        public QuotaClient(WebClient.Builder builder,
+                           @Value("${billing.service.url}") String baseUrl) {
+            this.webClient = builder.baseUrl(baseUrl).build();
+        }
+
+        /**
+         * activeRules: billing không sở hữu bảng rules (db-per-service) nên không tự đếm được —
+         * rule-engine đếm từ DB của chính mình rồi truyền qua, billing chỉ so với giới hạn gói.
+         * Trả empty nếu billing chưa phản hồi (timeout / connection refused).
+         * Service xử lý fail-open: empty → cho phép tạo rule.
+         */
+        public Optional<QuotaStatus> check(UUID tenantId, int activeRules) {
+            return webClient.get()
+                    .uri("/internal/quota/{tenantId}?activeRules={activeRules}", tenantId, activeRules)
+                    .retrieve()
+                    .bodyToMono(QuotaStatus.class)
+                    .timeout(Duration.ofSeconds(2))
+                    .blockOptional();
+        }
+    }
+- type: prose
+  content: '`RuleService.checkQuota()` (đã có khung từ Chặng 5) giờ tự đếm rule đang `ACTIVE` của tenant trước khi hỏi billing — khớp đúng tham số `activeRules` mới của `QuotaClient`:'
+- type: callout
+  variant: info
+  content: 'Trước khi thêm billing, một thói quen tốt: chạy lại TOÀN BỘ bộ test hiện có. Việc đó lộ ra `RuleServiceTest` vẫn còn mock `ruleRepository.save()` trong khi `RuleService.create()` đã đổi sang `saveAndFlush()` từ bước 5.8 — hai test đó sẽ luôn NPE nếu ai chạy, chỉ là chưa ai chạy lại nên chưa lộ. Bug này không liên quan gì tới billing, nhưng nếu không bắt bây giờ thì nó nằm im chờ chờ đúng lúc bận rộn nhất mới phát tác.'
+- type: callout
+  variant: tip
+  content: 'Bài học vận hành: mỗi khi chuẩn bị build tính năng MỚI trên một service cũ, chạy lại full test suite của service đó trước — không phải vì tính năng mới cần, mà vì đó là cơ hội rẻ nhất để bắt nợ kỹ thuật đã âm thầm tồn tại.'
+- type: command
+  label: Chạy lại toàn bộ test rule-engine (bắt bug có sẵn + xác nhận đã sửa)
+  content: |
+    ./gradlew :rule-engine:test
+    # BUILD SUCCESSFUL — toan bo test pass, ke ca 2 test tung fail neu chay
+- type: command
+  label: Lưu mốc bước 7.2
+  content: |
+    git add rule-engine
+    git commit -m "[step-7.2] rule-engine: QuotaClient.check() nhan activeRules + fix bug co san RuleServiceTest"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-7.2)
+  url: https://github.com/KouTaru99/market-pulse/commit/84366fe

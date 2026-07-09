@@ -1,0 +1,153 @@
+id: bi-05
+title: 'billing: nghe alert, tăng đếm, bắn cảnh báo vượt hạn mức'
+order: 5
+est_minutes: 30
+commit_ref: df1fe9f
+goal: 'Nối các mảnh lại: AlertUsageConsumer nghe mỗi alert, UsageService tăng đếm và so với gói, QuotaEventPublisher bắn sự kiện khi vượt.'
+deliverable: AlertUsageConsumer (@RabbitListener) + UsageService (nghiệp vụ) + QuotaEventPublisher.
+outcome_preview: Sau bước này, mỗi alert bắn ra sẽ tự động cộng vào bộ đếm tháng của tenant, và nếu vượt hạn mức gói, một QuotaExceededEvent sẽ bay tới rule-engine.
+blocks:
+- type: prose
+  content: '`AlertUsageConsumer` là một `@RabbitListener` khác lắng nghe CÙNG một loại sự kiện `AlertTriggeredEvent` mà alert-delivery (Chặng 6) cũng nghe — nhưng qua queue riêng của billing, với một mục đích hoàn toàn khác: không gửi webhook, chỉ đếm.'
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/consumer/AlertUsageConsumer.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.consumer;
+
+    import com.marketpulse.billing.config.RabbitConfig;
+    import com.marketpulse.billing.service.UsageService;
+    import com.marketpulse.common.event.AlertTriggeredEvent;
+    import org.springframework.amqp.rabbit.annotation.RabbitListener;
+    import org.springframework.stereotype.Component;
+
+    import java.util.UUID;
+
+    @Component
+    public class AlertUsageConsumer {
+
+        private final UsageService usageService;
+
+        public AlertUsageConsumer(UsageService usageService) {
+            this.usageService = usageService;
+        }
+
+        @RabbitListener(queues = RabbitConfig.ALERTS_QUEUE)
+        public void onAlert(AlertTriggeredEvent event) {
+            usageService.recordAlertFired(UUID.fromString(event.tenantId()));
+        }
+    }
+- type: prose
+  content: '`UsageService` là nơi nghiệp vụ thật sự diễn ra: tăng đếm nguyên tử (bước trước), đọc lại số mới, rồi so với hạn mức gói (qua `TenantPlanClient`, có cache):'
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/service/UsageService.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.service;
+
+    import com.marketpulse.billing.client.TenantPlan;
+    import com.marketpulse.billing.client.TenantPlanClient;
+    import com.marketpulse.billing.domain.UsagePeriod;
+    import com.marketpulse.billing.repository.UsagePeriodRepository;
+    import org.springframework.stereotype.Service;
+
+    import java.time.YearMonth;
+    import java.util.Optional;
+    import java.util.UUID;
+
+    @Service
+    public class UsageService {
+
+        private final UsagePeriodRepository usagePeriodRepository;
+        private final TenantPlanClient tenantPlanClient;
+        private final QuotaEventPublisher quotaEventPublisher;
+
+        public UsageService(UsagePeriodRepository usagePeriodRepository,
+                             TenantPlanClient tenantPlanClient,
+                             QuotaEventPublisher quotaEventPublisher) {
+            this.usagePeriodRepository = usagePeriodRepository;
+            this.tenantPlanClient = tenantPlanClient;
+            this.quotaEventPublisher = quotaEventPublisher;
+        }
+
+        /** Tăng đếm alert đã bắn trong tháng; nếu vượt max_alerts_pm của gói → phát QuotaExceededEvent. */
+        public void recordAlertFired(UUID tenantId) {
+            String period = currentPeriod();
+            usagePeriodRepository.incrementAlertsFired(tenantId, period);
+            int current = alertsFiredInCurrentPeriod(tenantId, period);
+
+            tenantPlanClient.get(tenantId).ifPresent(plan -> {
+                if (current > plan.maxAlertsPm()) {
+                    quotaEventPublisher.publishAlertsExceeded(tenantId, current, plan.maxAlertsPm());
+                }
+            });
+        }
+
+        public int alertsFiredInCurrentPeriod(UUID tenantId) {
+            return alertsFiredInCurrentPeriod(tenantId, currentPeriod());
+        }
+
+        public Optional<TenantPlan> planFor(UUID tenantId) {
+            return tenantPlanClient.get(tenantId);
+        }
+
+        private int alertsFiredInCurrentPeriod(UUID tenantId, String period) {
+            return usagePeriodRepository.findByTenantIdAndPeriod(tenantId, period)
+                    .map(UsagePeriod::getAlertsFired)
+                    .orElse(0);
+        }
+
+        private String currentPeriod() {
+            return YearMonth.now().toString();
+        }
+    }
+- type: prose
+  content: 'Khi vượt, `QuotaEventPublisher` bắn một `QuotaExceededEvent` vào exchange `market-pulse.quota` — sự kiện mà rule-engine (Chặng 5) đã biết lắng nghe để chuyển rule sang trạng thái `EVAL_PAUSED`:'
+- type: code
+  filename: billing/src/main/java/com/marketpulse/billing/service/QuotaEventPublisher.java
+  lang: java
+  content: |
+    package com.marketpulse.billing.service;
+
+    import com.marketpulse.billing.config.RabbitConfig;
+    import com.marketpulse.common.event.QuotaExceededEvent;
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.amqp.rabbit.core.RabbitTemplate;
+    import org.springframework.stereotype.Component;
+
+    import java.time.OffsetDateTime;
+    import java.time.ZoneOffset;
+    import java.util.UUID;
+
+    @Component
+    public class QuotaEventPublisher {
+
+        private static final Logger log = LoggerFactory.getLogger(QuotaEventPublisher.class);
+
+        private final RabbitTemplate rabbitTemplate;
+
+        public QuotaEventPublisher(RabbitTemplate rabbitTemplate) {
+            this.rabbitTemplate = rabbitTemplate;
+        }
+
+        public void publishAlertsExceeded(UUID tenantId, int currentCount, int limit) {
+            QuotaExceededEvent event = new QuotaExceededEvent(
+                    tenantId.toString(), "ALERTS", currentCount, limit,
+                    OffsetDateTime.now(ZoneOffset.UTC).toString());
+            rabbitTemplate.convertAndSend(RabbitConfig.QUOTA_EXCHANGE, RabbitConfig.QUOTA_ROUTING_KEY, event);
+            log.info("Quota alerts vượt mức: tenant={} current={} limit={}", tenantId, currentCount, limit);
+        }
+    }
+- type: callout
+  variant: info
+  content: 'Đây chính là nửa **bất đồng bộ** của ADR-003: không ai chờ billing trả lời trước khi cho phép một alert đi qua (khác hẳn nhánh đồng bộ lúc tạo rule ở bước 7.1-7.2). Tenant có thể tạm thời vượt hạn mức trong khoảnh khắc alert vừa bắn ra và trước khi `QuotaExceededEvent` kịp tới rule-engine — một đánh đổi có chủ đích: chấp nhận vượt một chút trong tích tắc, đổi lấy việc không làm nghẽn đường đi của alert.'
+- type: command
+  label: Lưu mốc bước 7.5
+  content: |
+    git add billing
+    git commit -m "[step-7.5] billing: AlertUsageConsumer (consume alerts rieng) + UsageService (tang dem theo thang, so plan, publish khi vuot) + QuotaEventPublisher"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-7.5)
+  url: https://github.com/KouTaru99/market-pulse/commit/df1fe9f

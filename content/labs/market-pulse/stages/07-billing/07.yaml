@@ -1,0 +1,109 @@
+id: bi-07
+title: 'billing: Dockerfile + đăng ký route gateway'
+order: 7
+est_minutes: 20
+commit_ref: c67a211
+goal: Đóng gói billing thành image Docker và mở route gateway cho /api/v1/usage.
+deliverable: billing/Dockerfile (multi-stage) + gateway route mới + healthcheck compose dùng wget.
+outcome_preview: Sau bước này, billing sẵn sàng chạy trong container, hoàn tất bộ ba service của Phần C (rule-engine tạo cảnh báo, alert-delivery giao, billing tính phí).
+blocks:
+- type: code
+  filename: billing/Dockerfile
+  lang: dockerfile
+  content: |
+    # Stage 1: Build
+    FROM eclipse-temurin:21-jdk AS builder
+    WORKDIR /workspace
+
+    # Gradle wrapper
+    COPY gradlew ./
+    COPY gradle gradle/
+
+    # Root build config
+    COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+
+    # Build files của mọi subproject (cần để Gradle evaluate settings.gradle.kts)
+    COPY common/build.gradle.kts       common/build.gradle.kts
+    COPY gateway/build.gradle.kts      gateway/build.gradle.kts
+    COPY identity/build.gradle.kts     identity/build.gradle.kts
+    COPY market-feed/build.gradle.kts  market-feed/build.gradle.kts
+    COPY aggregation/build.gradle.kts  aggregation/build.gradle.kts
+    COPY rule-engine/build.gradle.kts  rule-engine/build.gradle.kts
+    COPY alert-delivery/build.gradle.kts alert-delivery/build.gradle.kts
+    COPY billing/build.gradle.kts      billing/build.gradle.kts
+
+    # Source code: chỉ common (dependency của billing) và billing
+    COPY common/src  common/src
+    COPY billing/src billing/src
+
+    RUN --mount=type=cache,target=/root/.gradle chmod +x gradlew && ./gradlew :billing:bootJar --no-daemon -x test
+
+    # Stage 2: Runtime
+    FROM eclipse-temurin:21-jre-alpine
+    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+    WORKDIR /app
+    COPY --from=builder /workspace/billing/build/libs/billing.jar app.jar
+    USER appuser
+    EXPOSE 8085
+    ENTRYPOINT ["java", "-Xmx256m", "-jar", "app.jar"]
+- type: prose
+  content: 'Route gateway thay cho dòng `TODO Chặng 7` để lại từ trước:'
+- type: code
+  filename: gateway/src/main/resources/application.yml
+  lang: yaml
+  content: |
+    server:
+      port: 8080
+
+    spring:
+      application:
+        name: gateway
+      cloud:
+        gateway:
+          routes:
+            - id: identity-keys
+              uri: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/keys/**
+            - id: rule-engine-rules
+              uri: ${RULE_ENGINE_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/v1/rules/**
+            - id: alert-delivery-alerts
+              uri: ${ALERT_DELIVERY_SERVICE_URL:http://localhost:8084}
+              predicates:
+                - Path=/api/v1/alerts/**
+            - id: billing-usage
+              uri: ${BILLING_SERVICE_URL:http://localhost:8085}
+              predicates:
+                - Path=/api/v1/usage/**
+
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info
+      endpoint:
+        health:
+          show-details: always
+
+    identity:
+      service:
+        url: ${IDENTITY_SERVICE_URL:http://localhost:8081}
+- type: callout
+  variant: warning
+  content: 'Bẫy `curl` không có trong `jre-alpine` xuất hiện LẦN THỨ NĂM ở đúng chỗ cũ: healthcheck của billing trong `infra/docker-compose.yml`. Lý do nó vẫn lặp dù đã bị bắt 4 lần trước (gateway, aggregation, rule-engine, identity gián tiếp qua template): khung `docker-compose.yml` với healthcheck-mẫu-dùng-`curl` cho MỌI service được viết một lần duy nhất ở Chặng 1, lúc chưa ai biết bẫy này — sau đó mỗi chặng chỉ sửa đúng dòng của service mình khi tới lượt xây. Bài học thật: sửa một bẫy ở nơi nó lộ ra (Chặng 2) không tự động sửa các bản sao chưa tới lượt chạm; muốn dứt hẳn phải quay lại sửa NGAY TỪ GỐC — cái giá của việc không làm vậy là bắt gặp cùng một bẫy N lần, N = số service còn lại.'
+- type: command
+  label: Sửa healthcheck billing trong infra/docker-compose.yml
+  content: |
+    # doi healthcheck cua billing tu curl sang wget:
+    #   test: ["CMD-SHELL", "wget -q --spider http://localhost:8085/actuator/health || exit 1"]
+- type: command
+  label: Lưu mốc bước 7.7
+  content: |
+    git add billing/Dockerfile gateway/src/main/resources/application.yml infra/docker-compose.yml
+    git commit -m "[step-7.7] billing: Dockerfile + fix healthcheck curl->wget + gateway route /api/v1/usage + IDENTITY_SERVICE_URL/BILLING_SERVICE_URL env"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-7.7)
+  url: https://github.com/KouTaru99/market-pulse/commit/c67a211
