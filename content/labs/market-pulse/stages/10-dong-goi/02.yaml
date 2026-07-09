@@ -1,0 +1,226 @@
+id: dg-02
+title: Viết Quick Start — dựng lại từ đầu không cần hỏi ai
+order: 2
+est_minutes: 20
+commit_ref: 812cb30
+goal: 'Viết phần Quick Start vào README: build+run+verify bằng 3 lệnh, cách tạo API key đầu tiên (giải bài toán con-gà-quả-trứng), và bảng tổng hợp mọi script kiểm thử đã xây suốt Lab.'
+deliverable: README.md — mục Quick Start + hướng dẫn bootstrap key + bảng 3 loại script (smoke từng chặng, smoke-full, load-test).
+outcome_preview: Sau bước này, một người chưa biết gì về Market Pulse có thể dựng lại toàn bộ hệ chỉ bằng cách đọc README, không cần hỏi người viết ra nó.
+blocks:
+- type: prose
+  content: 'Có code chạy được là một chuyện; có **tài liệu để người khác (hoặc chính bạn, sáu tháng sau) tự dựng lại được** là chuyện khác. README bổ sung đúng phần còn thiếu: 3 lệnh để từ một máy trống chạy được toàn bộ hệ.'
+- type: code
+  filename: README.md
+  lang: markdown
+  content: |
+    # Market Pulse
+
+    Nền tảng cảnh báo thị trường real-time theo mô hình B2B. Tenant đăng ký rule (ngưỡng giá, thay đổi %, đột biến volume), khi điều kiện khớp hệ tự động gọi webhook. Dữ liệu đến từ Binance WebSocket (~80 trades/giây với BTC/USDT).
+
+    **Mục đích:** Đây là repo mẫu cho Lab lớn trên nền tảng Praxis — người học xây từng bước theo 10 chặng, mỗi chặng kết thúc bằng milestone có thể chạy thật.
+
+    ---
+
+    ## Kiến trúc tổng thể
+
+    ```
+                     ┌─────────────────────────────────────────────┐
+                     │           Tenant / Dashboard (FE)           │
+                     └──────────────────┬──────────────────────────┘
+                                        │ HTTP  X-API-Key: <raw-key>
+                     ┌──────────────────▼──────────────────────────┐
+                     │              gateway  :8080                  │
+                     │  GlobalFilter: auth + forward                │
+                     │  add X-Tenant-Id, remove X-API-Key          │
+                     └───┬───────────┬──────────┬───────────┬──────┘
+                   /keys │     /rules│  /alerts │    /usage │
+                         │           │          │           │
+            ┌────────────▼──┐  ┌─────▼──────┐ ┌▼──────────┐ ┌────▼───────┐
+            │ identity :8081│  │rule-engine │ │alert-del. │ │ billing    │
+            │ Tenant/Plan/  │  │   :8083    │ │   :8084   │ │   :8085    │
+            │ ApiKey CRUD   │  └─────┬──┬───┘ └─────┬─────┘ └────┬───────┘
+            └───────┬───────┘        │  │            │            │
+              PG    │                │  └──► GET /internal/quota  │
+            :5432   │    ┌───────────────────────────────────────────────────┐
+                    │    │               RabbitMQ  :5672 / :15672            │
+                    │    │  Exchanges:                                        │
+                    │    │   market-pulse.trades  (fanout)                   │
+                    │    │   market-pulse.candles (topic)                    │
+                    │    │   market-pulse.alerts  (direct)                   │
+                    │    │   market-pulse.quota   (direct)                   │
+                    │    └────────┬─────────────────────────────────────────┘
+                    │             │ TradeEvent
+                    │  ┌──────────▼──────────┐     ┌──────────────────────┐
+                    │  │  market-feed  :8082  │     │  aggregation  :8086  │
+                    │  │  Binance WS live /   │     │  1m OHLCV + VWAP     │
+                    │  │  record / replay ×N  │     │  rolling 60m volume  │
+                    │  └──────────────────────┘     └──────────┬───────────┘
+                    │                                    PG    │
+                    │                                  :5433   │
+                    │  identity-db :5432                       │
+                    │  aggregation-db :5433                    │ Candle1mEvent
+                    │  rule-engine-db :5434    ←───────────────┘
+                    │  alert-delivery-db :5435
+                    └─ billing-db :5436
+    ```
+
+    **Luồng dữ liệu chính:**
+
+    ```
+    Binance WS → market-feed → TradeEvent → RabbitMQ
+                                                ├─→ aggregation → Candle1mEvent → RabbitMQ → rule-engine
+                                                └─→ rule-engine (khi rule match)
+                                                        │ AlertTriggeredEvent → RabbitMQ
+                                                        ├─→ alert-delivery → POST webhook → tenant
+                                                        └─→ billing → đếm usage → quota check
+    ```
+
+    ---
+
+    ## Cấu trúc mono-repo
+
+    ```
+    market-pulse/
+    ├── common/              # Event DTOs dùng chung (duy nhất được share giữa service)
+    ├── gateway/             # Spring Cloud Gateway — auth + routing
+    ├── identity/            # Tenant, Plan, ApiKey CRUD
+    ├── market-feed/         # Binance WS client; live/record/replay mode
+    ├── aggregation/         # Tumbling 1m window; OHLCV + VWAP
+    ├── rule-engine/         # Rule evaluation; quota check
+    ├── alert-delivery/      # Webhook delivery + DB-backed retry
+    ├── billing/             # Usage counter; quota enforcement
+    ├── dashboard/           # React + Vite SPA (NOT Gradle subproject)
+    ├── infra/               # docker-compose.yml, .env.example, RabbitMQ definitions
+    ├── docs/
+    │   ├── requirements.md
+    │   └── adr/             # ADR-001 → ADR-004
+    └── README.md
+    ```
+
+    > **Quy tắc ranh giới service:** mỗi service chỉ được `implementation(project(":common"))`. Không import chéo giữa các service — vi phạm là build error. (Xem ADR-002)
+
+    ---
+
+    ## Bảng port
+
+    | Component | Port | Ghi chú |
+    |-----------|------|---------|
+    | `gateway` | 8080 | Cổng vào duy nhất cho tenant |
+    | `identity` | 8081 | Internal + qua gateway |
+    | `market-feed` | 8082 | Không expose REST ra ngoài |
+    | `rule-engine` | 8083 | Qua gateway |
+    | `alert-delivery` | 8084 | Qua gateway |
+    | `billing` | 8085 | Qua gateway + internal |
+    | `aggregation` | 8086 | Internal only |
+    | `dashboard` | 5173 | Dev: Vite dev server · Docker (`--profile full`): build tĩnh phục vụ qua Caddy |
+    | `identity-db` (PG) | 5432 | |
+    | `aggregation-db` (PG) | 5433 | |
+    | `rule-engine-db` (PG) | 5434 | |
+    | `alert-delivery-db` (PG) | 5435 | |
+    | `billing-db` (PG) | 5436 | |
+    | RabbitMQ AMQP | 5672 | |
+    | RabbitMQ Management UI | 15672 | `guest/guest` |
+    | Mailhog SMTP | 1025 | |
+    | Mailhog Web UI | 8025 | |
+
+    ---
+
+    ## Compose profile
+
+    Mỗi profile nhóm các service liên quan — khởi động từng phần mà không cần bật toàn bộ JVM từ Chặng 1.
+
+    | Profile | Service khởi động | Mục đích |
+    |---------|-------------------|---------|
+    | `core` | gateway, identity, identity-db | Auth + routing — Chặng 2 |
+    | `feed` | market-feed, rabbitmq | Dòng dữ liệu Binance — Chặng 3 |
+    | `processing` | aggregation, aggregation-db, rule-engine, rule-engine-db, rabbitmq | Aggregation + rule eval — Chặng 4–5 |
+    | `delivery` | alert-delivery, alert-delivery-db, billing, billing-db, mailhog, rabbitmq | Delivery + billing — Chặng 6–7 |
+    | `full` | tất cả + dashboard | End-to-end — Chặng 8–10 |
+
+    > **Lưu ý:** Các profile trên sẽ hoàn thiện dần theo chặng. Ở Chặng 1, file `docker-compose.yml` chưa tồn tại — được build từ Chặng 2 trở đi.
+
+    ```bash
+    # Ví dụ chạy profile core (Chặng 2 trở đi)
+    docker compose --profile core up -d
+
+    # Kiểm tra health
+    docker compose ps
+
+    # Xem log service cụ thể
+    docker compose logs -f gateway
+
+    # Dừng
+    docker compose --profile core down
+    ```
+
+    ---
+
+    ## Prerequisite
+
+    - Docker Desktop ≥ 4.x (Engine ≥ 24)
+    - Java 21 (Temurin/GraalVM CE)
+    - Gradle 8.x (wrapper tự tải — không cần cài tay)
+    - Node.js 20 (chỉ cần cho `dashboard/`; `package-lock.json` đã ghim `vite@6`/`plugin-react@4` vì
+      Vite 8 mới nhất đòi Node 20.19+ — `npm ci` tái lập đúng bản bất kể patch version Node cài local)
+    - RAM tối thiểu: 16 GB (profile `full` ~3.5–4.2 GB)
+
+    ---
+
+    ## Quick Start — chạy toàn bộ hệ từ đầu
+
+    ```bash
+    cd infra
+    cp .env.example .env   # điền mật khẩu thật nếu cần, mặc định "change_me" đủ dùng local
+
+    # Build + chạy TOÀN BỘ (7 JVM + 5 Postgres + RabbitMQ + Mailhog + Dashboard)
+    docker compose --env-file .env --profile full up -d --build
+
+    # Verify mọi service healthy + 1 vòng nghiệp vụ thật (tạo rule → trade Binance live → DELIVERED)
+    cd .. && bash scripts/smoke-full.sh
+    ```
+
+    **Tạo API key đầu tiên** (bootstrap — gọi thẳng `identity`, KHÔNG qua gateway vì cần `X-Tenant-Id`
+    trước khi có key; các thao tác SAU đó — kể cả tạo thêm key — đều qua gateway với `X-API-Key`):
+
+    ```bash
+    curl -X POST http://localhost:8081/api/v1/keys \
+      -H "X-Tenant-Id: 00000000-0000-0000-0001-000000000001" \
+      -H "Content-Type: application/json" -d '{"label":"my-first-key"}'
+    ```
+
+    Hoặc dùng luôn key demo có sẵn (seed `V2__seed.sql`, tenant "Acme Corp", gói `starter`):
+    `demo-key-acme-2026` — dán vào màn đăng nhập dashboard tại http://localhost:5173.
+
+    ## Scripts kiểm thử tham khảo
+
+    | Script | Kiểm gì |
+    |--------|---------|
+    | `scripts/smoke-ch2.sh` … `smoke-ch7.sh` | Milestone từng chặng riêng lẻ (gateway/identity, market-feed, aggregation, rule-engine, alert-delivery, billing) |
+    | `scripts/smoke-full.sh` | Milestone Chặng 10 — toàn bộ `--profile full` healthy + 1 vòng nghiệp vụ thật đầu-cuối |
+    | `scripts/load-test.sh <multiplier> [giây] [file]` | Chặng 9 — replay ở tốc độ bất kỳ, theo dõi queue depth `rule-engine.trades` so ngưỡng gãy (>5,000 msg, xem [docs/load-test-report.md](docs/load-test-report.md)) |
+
+    ---
+
+    ## Tham khảo
+
+    - [docs/requirements.md](docs/requirements.md) — Product requirements
+    - [docs/adr/](docs/adr/) — Architecture Decision Records
+    - [docs/load-test-report.md](docs/load-test-report.md) — Chặng 9: kết quả load-test thật (dữ liệu Binance thật, không dựng số)
+    - Lab content: xem trên nền tảng Praxis
+- type: callout
+  variant: info
+  content: 'Hướng dẫn tạo API key đầu tiên giải đúng bài toán *con-gà-quả-trứng* đã gặp từ Chặng 2: tạo key cần gọi identity, nhưng mọi request thường đi qua gateway cần CÓ key rồi. Cách giải: bước bootstrap DUY NHẤT gọi thẳng `identity:8081` (bỏ qua gateway) kèm `X-Tenant-Id` — mọi thao tác SAU đó, kể cả tạo thêm key, đều qua gateway với `X-API-Key` như bình thường.'
+- type: prose
+  content: 'Bảng script kiểm thử tham khảo là một tấm bản đồ nhỏ nhìn lại cả hành trình: mỗi chặng để lại đúng MỘT công cụ kiểm chứng độc lập, tất cả vẫn chạy lại được bất cứ lúc nào — không phải tài liệu tĩnh mô tả suông.'
+- type: callout
+  variant: tip
+  content: 'Node.js ghim ở bản 20 (không phải "20+") kèm lý do rõ ràng ngay trong README — một chi tiết nhỏ nhưng đúng tinh thần trung thực của cả Lab: đừng chỉ nói "cần Node 20+", mà nói rõ VÌ SAO một số bản mới hơn (Vite 8 đòi Node ≥20.19) lại không dùng được ở đây.'
+- type: command
+  label: Lưu mốc bước 10.2
+  content: |
+    git add README.md
+    git commit -m "docs: README - them Quick Start (build+run+verify profile full), huong dan tao API key dau tien, bang script kiem thu tham khao"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-10.2)
+  url: https://github.com/KouTaru99/market-pulse/commit/812cb30

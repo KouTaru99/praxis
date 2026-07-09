@@ -1,0 +1,169 @@
+id: dg-01
+title: 'Milestone cuối: bật profile full — 15 container + 1 vòng nghiệp vụ thật'
+order: 1
+est_minutes: 30
+commit_ref: '3693754'
+goal: Lần đầu tiên bật TOÀN BỘ hệ cùng lúc (7 service Java + 5 Postgres + RabbitMQ + Mailhog + Dashboard), verify bằng một kịch bản thật đầu-cuối, không publish event giả lập nào.
+deliverable: 'scripts/smoke-full.sh (13 healthcheck + 1 vòng nghiệp vụ thật: tạo key → tạo rule → trade Binance LIVE khớp → alert → DELIVERED).'
+outcome_preview: Sau bước này, bạn gõ đúng MỘT lệnh và thấy cả 15 container cùng sống, cùng nói chuyện với nhau, và một cảnh báo thật tự sinh ra từ một trade Binance đang chạy sống ngoài đời.
+blocks:
+- type: prose
+  content: Suốt 9 chặng, mỗi service đều được test riêng bằng profile của chính nó (`core`, `feed`, `processing`, `delivery`...). Chặng 10 là lần ĐẦU TIÊN mọi thứ chạy CÙNG LÚC — `--profile full`.
+- type: diagram
+  content: |
+    sequenceDiagram
+      participant U as Ban (curl)
+      participant ID as identity
+      participant GW as gateway
+      participant RE as rule-engine
+      participant BN as Binance LIVE that
+      participant AD as alert-delivery
+      participant WH as webhook test (:9300)
+      U->>ID: POST /api/v1/keys (bootstrap, X-Tenant-Id)
+      ID-->>U: raw key (chi hien 1 lan)
+      U->>GW: POST /api/v1/rules (X-API-Key, threshold rat cao)
+      GW->>RE: forward qua gateway
+      BN->>RE: trade that (qua market-feed + aggregation)
+      RE->>RE: khop nguong ngay lap tuc (threshold luon dung voi gia that)
+      RE->>AD: AlertTriggeredEvent
+      AD->>WH: POST webhook
+      WH-->>AD: 200
+      U->>GW: GET /api/v1/alerts -> DELIVERED
+- type: prose
+  content: 'Điểm đặc biệt của `smoke-full.sh`: nó KHÔNG publish một event giả lập nào cả (khác `smoke-ch6/7.sh` trước đó, vốn tự bơm `AlertTriggeredEvent` thẳng vào exchange để cô lập phép thử). Ở đây, alert phải tự nảy sinh từ một **trade Binance LIVE thật** đi qua toàn bộ chuỗi thật: market-feed → aggregation → rule-engine → alert-delivery.'
+- type: code
+  filename: scripts/smoke-full.sh
+  lang: bash
+  content: |
+    #!/usr/bin/env bash
+    # smoke-full.sh — Milestone Chặng 10: docker compose --profile full, verify TOÀN BỘ hệ + 1 vòng
+    # nghiệp vụ thật đầu-cuối (tạo key → tạo rule → alert tự trigger từ trade Binance THẬT → DELIVERED).
+    # Không publish event giả lập — dựa hoàn toàn vào market-feed FEED_MODE=live đang chạy thật.
+    # Cách chạy: bash scripts/smoke-full.sh (yêu cầu đã `docker compose --profile full up -d`)
+
+    set -uo pipefail
+
+    COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.yml}"
+    GATEWAY_URL="${GATEWAY_URL:-http://localhost:8080}"
+    IDENTITY_URL="${IDENTITY_URL:-http://localhost:8081}"
+    TENANT_ID="${TENANT_ID:-00000000-0000-0000-0001-000000000001}"
+    PASS=0
+    FAIL=0
+
+    check() {
+        local label="$1" got="$2" want="$3"
+        if [ "$got" = "$want" ]; then echo "PASS  ${label}"; PASS=$((PASS + 1))
+        else echo "FAIL  ${label}  (got=${got}, want=${want})"; FAIL=$((FAIL + 1)); fi
+    }
+
+    echo "=== Smoke test Chặng 10 — profile full, trọn hệ + 1 vòng nghiệp vụ thật ==="
+    echo ""
+
+    # ── TC1-9: healthcheck toàn bộ service có healthcheck ──────────────────────
+    for svc in gateway identity market-feed aggregation rule-engine alert-delivery billing \
+               identity-db aggregation-db rule-engine-db alert-delivery-db billing-db rabbitmq; do
+        cid=$(docker compose -f "${COMPOSE_FILE}" ps -q "${svc}" 2>/dev/null)
+        health=$(docker inspect -f '{{.State.Health.Status}}' "${cid}" 2>/dev/null || echo "missing")
+        check "TC-health  ${svc} healthy" "$health" "healthy"
+    done
+
+    # ── TC: dashboard + mailhog phản hồi (không có healthcheck riêng, kiểm HTTP trực tiếp) ──
+    dash_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/ 2>/dev/null)
+    check "TC-dashboard  phản hồi HTTP" "$dash_code" "200"
+    mailhog_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8025/ 2>/dev/null)
+    check "TC-mailhog  phản hồi HTTP" "$mailhog_code" "200"
+
+    # ── Vòng nghiệp vụ thật: tạo key → tạo rule always-match → chờ alert THẬT tự trigger ──
+    LABEL="smoke-full-$(date +%s)"
+    create_key=$(curl -s -X POST "${IDENTITY_URL}/api/v1/keys" \
+        -H "X-Tenant-Id: ${TENANT_ID}" -H "Content-Type: application/json" \
+        -d "{\"label\":\"${LABEL}\"}")
+    api_key=$(printf '%s' "$create_key" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null)
+    key_id=$(printf '%s' "$create_key" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    check "TC-key  tạo API key qua identity" "$([ -n "$api_key" ] && echo yes || echo no)" "yes"
+
+    create_rule=$(curl -s -X POST "${GATEWAY_URL}/api/v1/rules" \
+        -H "X-API-Key: ${api_key}" -H "Content-Type: application/json" \
+        -d '{"symbol":"BTCUSDT","type":"PRICE_THRESHOLD","params":{"threshold":"1000000","direction":"BELOW"},"webhookUrl":"http://host.docker.internal:9300/hook"}')
+    rule_status=$(printf '%s' "$create_rule" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+    rule_id=$(printf '%s' "$create_rule" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    check "TC-rule  tạo rule qua gateway (X-API-Key)" "$rule_status" "ACTIVE"
+
+    # webhook listener thật để nhận alert (trade Binance live sẽ tự khớp ngưỡng cực cao)
+    cat > /tmp/smoke-full-webhook.py <<'PYEOF'
+    import http.server
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.end_headers()
+        def log_message(self, fmt, *args):
+            pass
+    http.server.HTTPServer(("0.0.0.0", 9300), Handler).serve_forever()
+    PYEOF
+    python3 /tmp/smoke-full-webhook.py &
+    WEBHOOK_PID=$!
+    sleep 1
+
+    echo "      [chờ tối đa ~70s cho trade Binance THẬT khớp ngưỡng → alert → DELIVERED...]"
+    alert_status="none"
+    n=0
+    while [ "$n" -lt 14 ]; do
+        sleep 5; n=$((n + 1))
+        alerts=$(curl -s "${GATEWAY_URL}/api/v1/alerts?size=5" -H "X-API-Key: ${api_key}")
+        alert_status=$(printf '%s' "$alerts" | python3 -c "
+    import sys,json
+    d=json.load(sys.stdin)
+    content=d.get('content',[])
+    matching=[a for a in content if a.get('ruleId')=='${rule_id}']
+    print(matching[0]['status'] if matching else 'none')
+    " 2>/dev/null || echo "none")
+        if [ "$alert_status" = "DELIVERED" ]; then break; fi
+    done
+    check "TC-e2e  alert THẬT tự trigger + DELIVERED [+$((n*5))s]" "$alert_status" "DELIVERED"
+
+    kill "${WEBHOOK_PID}" 2>/dev/null
+    rm -f /tmp/smoke-full-webhook.py
+
+    # ── dọn: xoá rule + thu hồi key test ────────────────────────────────────────
+    [ -n "${rule_id}" ] && curl -s -X DELETE "${GATEWAY_URL}/api/v1/rules/${rule_id}" -H "X-API-Key: ${api_key}" >/dev/null 2>&1
+    [ -n "${key_id}" ] && curl -s -X DELETE "${IDENTITY_URL}/api/v1/keys/${key_id}" -H "X-Tenant-Id: ${TENANT_ID}" >/dev/null 2>&1
+
+    echo ""
+    echo "=== Kết quả: PASS=${PASS}  FAIL=${FAIL} ==="
+    if [ "${FAIL}" -eq 0 ]; then
+        echo "PASS  Chặng 10 milestone — profile full: toàn bộ service healthy + luồng nghiệp vụ thật chạy đầu-cuối"
+        exit 0
+    else
+        echo "FAIL  Chặng 10 — kiểm tra: docker compose -f ${COMPOSE_FILE} logs <service>"
+        exit 1
+    fi
+- type: callout
+  variant: tip
+  content: 'Mẹo hay nhất trong script: rule test dùng `threshold=1000000, direction=BELOW` cho BTCUSDT — một ngưỡng CHẮC CHẮN đúng với bất kỳ giá BTC thật nào (không ai kỳ vọng BTC vượt 1 triệu USD trong lúc chạy test). Nhờ vậy, alert đầu tiên tự trigger chỉ sau vài giây mà không cần đoán đúng giá thị trường tại thời điểm chạy — kỹ thuật hữu ích khi cần một sự kiện "chắc chắn xảy ra" từ dữ liệu sống thay vì kiểm soát được.'
+- type: command
+  label: Bật toàn bộ hệ và verify
+  content: |
+    cd infra && cp .env.example .env
+    docker compose --env-file .env --profile full up -d --build
+    cd .. && bash scripts/smoke-full.sh
+    # PASS  TC-health x13 (gateway/identity/market-feed/.../rabbitmq)
+    # PASS  TC-dashboard phan hoi HTTP
+    # PASS  TC-mailhog phan hoi HTTP
+    # PASS  TC-key  tao API key qua identity
+    # PASS  TC-rule tao rule qua gateway
+    # PASS  TC-e2e  alert THAT tu trigger + DELIVERED [+5s]
+    # === Ket qua: PASS=18  FAIL=0 ===
+- type: callout
+  variant: info
+  content: 18/18 PASS trong ~5 giây cho ca đầu-cuối — nhanh hơn nhiều so với lo ngại ban đầu ở Chặng 9 (kế hoạch tưởng cần ×10 tải mới thấy vấn đề). Ở điều kiện vận hành bình thường (không downtime), toàn bộ chuỗi 7 service phản hồi gần như tức thời.
+- type: command
+  label: Lưu mốc bước 10.1
+  content: |
+    git add scripts/smoke-full.sh
+    git commit -m "[step-10.1/10.2] scripts/smoke-full.sh: milestone Chang 10 - profile full 15 container + 1 vong nghiep vu that dau-cuoi"
+- type: resource
+  kind: docs
+  label: Commit đối chiếu trên repo mẫu (step-10.1)
+  url: https://github.com/KouTaru99/market-pulse/commit/3693754
